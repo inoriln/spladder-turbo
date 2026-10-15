@@ -1,3 +1,5 @@
+import os
+import sys
 import pysam
 import re
 import numpy as np
@@ -7,16 +9,21 @@ import time
 import h5py
 import uuid
 
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 
 if __package__ is None:
     __package__ = 'modules'
 
 from .utils import *
 from .init import *
+from . import evidence
 
-def get_reads(fname, chr_name, start, stop, strand=None, filter=None, mapped=True, spliced=True, var_aware=None, collapse=False, primary_only=False, no_mm=False, mm_tag='NM', cram_ref=None):
-    
+def _get_reads_reference(fname, chr_name, start, stop, strand=None, filter=None, mapped=True, spliced=True, var_aware=None, collapse=False, primary_only=False, no_mm=False, mm_tag='NM', cram_ref=None):
+    """Verbatim original implementation of get_reads.
+
+    It handles collapse=False (sparse read matrix) and is the reference the optimized
+    collapsed code path is tested against (tests/test_reads.py)."""
+
     if not re.search(r'\.[bB][aA][mM]$', fname) is None:
         infile = pysam.AlignmentFile(fname, 'rb')
     elif not re.search(r'\.[cC][rR][aA][mM]$', fname) is None:
@@ -146,7 +153,171 @@ def get_reads(fname, chr_name, start, stop, strand=None, filter=None, mapped=Tru
     return (read_matrix, introns_p, introns_m) 
 
 
-def add_reads_from_bam(blocks, filenames, types, filter=None, var_aware=False, primary_only=False, no_mm=False, unstranded=True, mm_tag='NM', cram_ref=None):
+### open alignment files are re-used between calls: opening a BAM parses its header and loads the
+### complete index, which used to happen once per gene and per processing step
+_ALIGNMENT_FILE_CACHE = OrderedDict()
+_ALIGNMENT_FILE_CACHE_MAX = 8
+
+def _get_alignment_file(fname, cram_ref=None):
+    """Returns an open pysam.AlignmentFile from a small LRU cache.
+
+    The cache is keyed by process id as well, so forked workers never share a file handle."""
+
+    key = (os.getpid(), fname, cram_ref)
+    infile = _ALIGNMENT_FILE_CACHE.get(key)
+    if infile is not None:
+        _ALIGNMENT_FILE_CACHE.move_to_end(key)
+        return infile
+    if not re.search(r'\.[bB][aA][mM]$', fname) is None:
+        infile = pysam.AlignmentFile(fname, 'rb')
+    elif not re.search(r'\.[cC][rR][aA][mM]$', fname) is None:
+        infile = pysam.AlignmentFile(fname, 'rc', reference_filename=cram_ref, ignore_truncation=True)
+    else:
+        sys.stderr.write('Error: Unknown input alignment format for: %s\n' % fname)
+        sys.exit(1)
+    _ALIGNMENT_FILE_CACHE[key] = infile
+    while len(_ALIGNMENT_FILE_CACHE) > _ALIGNMENT_FILE_CACHE_MAX:
+        _, oldest = _ALIGNMENT_FILE_CACHE.popitem(last=False)
+        oldest.close()
+    return infile
+
+
+def _get_reads_collapsed(fname, chr_name, start, stop, strand, filter, mapped, spliced, var_aware, primary_only, no_mm, mm_tag, cram_ref):
+    """Coverage and introns of one window; same result as _get_reads_reference(..., collapse=True).
+
+    The speed-up comes from decoding the CIGAR only once, reading just the tags that are needed (instead
+    of converting all tags of every read), avoiding exceptions and regular expressions in the per-read
+    loop, and from accumulating the coverage in a difference array."""
+
+    start = int(start)
+    stop = int(stop)
+    length = stop - start
+
+    ### TODO THIS IS A HACK
+    if chr_name == 'MT':
+        return (np.zeros((1, length), dtype='int'), np.zeros(shape=(0, 3), dtype='uint32'), np.zeros(shape=(0, 3), dtype='uint32'))
+
+    introns_p = defaultdict(int)
+    introns_m = defaultdict(int)
+    cov_start = []
+    cov_stop = []
+
+    infile = _get_alignment_file(fname, cram_ref)
+    if infile.gettid(chr_name) > -1:
+        ### pysam query is zero based in position (results are as well), all intervals are pythonic half open
+        for read in infile.fetch(chr_name, start, stop, until_eof=True):
+
+            flag = read.flag
+            if flag & 4:                          # unmapped
+                continue
+            if primary_only and (flag & 256):     # secondary
+                continue
+
+            cigar = read.cigartuples
+            is_spliced = False
+            for op, ln in cigar:
+                if op == 3:
+                    is_spliced = True
+                    break
+            if is_spliced:
+                if not spliced:
+                    continue
+            elif not mapped:
+                continue
+
+            if filter is not None:
+                ### handle mismatches
+                if var_aware:
+                    tags = dict(read.tags)
+                    if filter['mismatch'] < (tags['XM'] + tags['XG']):
+                        continue
+                elif not no_mm:
+                    try:
+                        nm = read.get_tag(mm_tag)
+                    except KeyError:
+                        print('SplAdder expects the NM tag (or the one set with --set-mm-tag) to be present in all input alignment files. If you are unable to provide this information in the input files, please restart SplAdder with the option --ignore-mismatches.', file=sys.stderr)
+                        sys.exit(1)
+                    if filter['mismatch'] < nm:
+                        continue
+
+                if is_spliced:
+                    ### handle min segment length: aligned length (M, D, =, X) of the shortest segment between introns
+                    seg = 0
+                    min_seg = -1
+                    for op, ln in cigar:
+                        if op == 3:
+                            if min_seg < 0 or seg < min_seg:
+                                min_seg = seg
+                            seg = 0
+                        elif op == 0 or op == 2 or op == 7 or op == 8:
+                            seg += ln
+                    if min_seg < 0 or seg < min_seg:
+                        min_seg = seg
+                    if min_seg <= filter['exon_len']:
+                        continue
+
+            ### check strand information
+            is_minus = False
+            if read.has_tag('XS'):
+                xs = read.get_tag('XS')
+                if strand is not None and xs != strand:
+                    continue
+                is_minus = (xs == '-')
+
+            ### get introns and coverage
+            p = read.reference_start
+            for op, ln in cigar:
+                if op == 3:
+                    if is_minus:
+                        introns_m[(p, p + ln)] += 1
+                    else:
+                        introns_p[(p, p + ln)] += 1
+                    p += ln
+                elif op == 0 or op == 2 or op == 7 or op == 8:
+                    e = p + ln
+                    if e > start:
+                        s = p - start
+                        if s < 0:
+                            s = 0
+                        e -= start
+                        if e > length:
+                            e = length
+                        if s < e:
+                            cov_start.append(s)
+                            cov_stop.append(e)
+                    p += ln
+
+    ### coverage from the difference array
+    if len(cov_start) > 0:
+        n = length + 1
+        diff = np.bincount(cov_start, minlength=n) - np.bincount(cov_stop, minlength=n)
+        read_matrix = np.cumsum(diff[:length], dtype='int')[np.newaxis, :]
+    else:
+        read_matrix = np.zeros((1, length), dtype='int')
+
+    ### convert introns into scipy array
+    if len(introns_p) >= 1:
+        introns_p = np.array([[k[0], k[1], v] for k, v in introns_p.items()], dtype='uint32')
+        introns_p = sort_rows(introns_p)
+    else:
+        introns_p = np.zeros(shape=(0, 3), dtype='uint32')
+    if len(introns_m) >= 1:
+        introns_m = np.array([[k[0], k[1], v] for k, v in introns_m.items()], dtype='uint32')
+        introns_m = sort_rows(introns_m)
+    else:
+        introns_m = np.zeros(shape=(0, 3), dtype='uint32')
+
+    return (read_matrix, introns_p, introns_m)
+
+
+def get_reads(fname, chr_name, start, stop, strand=None, filter=None, mapped=True, spliced=True, var_aware=None, collapse=False, primary_only=False, no_mm=False, mm_tag='NM', cram_ref=None):
+
+    if collapse:
+        return _get_reads_collapsed(fname, chr_name, start, stop, strand, filter, mapped, spliced, var_aware, primary_only, no_mm, mm_tag, cram_ref)
+    return _get_reads_reference(fname, chr_name, start, stop, strand, filter, mapped, spliced, var_aware, collapse, primary_only, no_mm, mm_tag, cram_ref)
+
+
+def add_reads_from_bam(blocks, filenames, types, filter=None, var_aware=False, primary_only=False, no_mm=False, unstranded=True, mm_tag='NM', cram_ref=None, use_cache=True):
     # blocks coordinates are assumed to be in closed intervals
 
     #if filter is None:
@@ -167,6 +338,12 @@ def add_reads_from_bam(blocks, filenames, types, filter=None, var_aware=False, p
 
     if type(blocks).__module__ != 'numpy':
         blocks = np.array([blocks])
+
+    ### inside an evidence scope, coverage and introns are taken from the single-pass read evidence
+    if use_cache:
+        cached = evidence.add_reads_from_evidence(blocks, filenames, types, filter, var_aware, primary_only, no_mm, unstranded, mm_tag, cram_ref)
+        if cached is not NotImplemented:
+            return cached
 
     for b in range(blocks.shape[0]):
 
@@ -414,7 +591,7 @@ def get_all_data_uncollapsed(block,filenames, mapped=True, spliced=True, filter=
 
     return (None, coverage)
 
-def get_intron_list(genes, bam_fnames, options):
+def get_intron_list(genes, bam_fnames, options, cache=True):
 
     introns = np.zeros((genes.shape[0], 2), dtype = 'object')
     introns[:] = None
@@ -478,7 +655,7 @@ def get_intron_list(genes, bam_fnames, options):
                                 k_idx = np.setdiff1d(np.arange(intron_list_tmp.shape[0]), rm_idx)
                                 intron_list_tmp = intron_list_tmp[k_idx, :]
                 else:
-                    [intron_list_tmp] = add_reads_from_bam(gg, bam_fnames, ['intron_list'], options.read_filter, options.var_aware, options.primary_only, options.ignore_mismatches, unstranded=options.introns_unstranded, mm_tag=options.mm_tag, cram_ref=options.ref_genome)
+                    [intron_list_tmp] = add_reads_from_bam(gg, bam_fnames, ['intron_list'], options.read_filter, options.var_aware, options.primary_only, options.ignore_mismatches, unstranded=options.introns_unstranded, mm_tag=options.mm_tag, cram_ref=options.ref_genome, use_cache=cache)
                 num_introns_filtered += intron_list_tmp.shape[0]
                 introns[i, si] = sort_rows(intron_list_tmp)
 

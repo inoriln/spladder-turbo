@@ -7,6 +7,9 @@ if __package__ is None:
 
 from .reads import *
 
+### genes with more introns than this (per strand) make the event extraction infeasible: the intron filter is tightened for them
+MAX_FEASIBLE_INTRONS = 200
+
 def make_introns_feasible(introns, genes, bam_fnames, options):
 
     tmp1 = np.array([x.shape[0] for x in introns[:, 0]])
@@ -17,7 +20,7 @@ def make_introns_feasible(introns, genes, bam_fnames, options):
     else:
         fd_log = open(options.logfile, 'w')
     
-    unfeas = np.where((tmp1 > 200) | (tmp2 > 200))[0]
+    unfeas = np.where((tmp1 > MAX_FEASIBLE_INTRONS) | (tmp2 > MAX_FEASIBLE_INTRONS))[0]
     print('found %i unfeasible genes' % unfeas.shape[0], file=fd_log)
 
     while unfeas.shape[0] > 0:
@@ -27,14 +30,15 @@ def make_introns_feasible(introns, genes, bam_fnames, options):
         options.read_filter['mismatch'] = max(options.read_filter['mismatch'] - 1, 0)
 
         ### get new intron counts
-        tmp_introns = get_intron_list(genes[unfeas], bam_fnames, options)
+        ### only few genes are queried here, so the (contig wide) read evidence would not pay off
+        tmp_introns = get_intron_list(genes[unfeas], bam_fnames, options, cache=False)
         introns[unfeas, :] = tmp_introns
 
         ### still unfeasible?
         tmp1 = np.array([x.shape[0] for x in introns[:, 0]])
         tmp2 = np.array([x.shape[0] for x in introns[:, 1]])
 
-        still_unfeas = np.where((tmp1 > 200) | (tmp2 > 200))[0]
+        still_unfeas = np.where((tmp1 > MAX_FEASIBLE_INTRONS) | (tmp2 > MAX_FEASIBLE_INTRONS))[0]
         idx = np.where(~np.isin(unfeas, still_unfeas))[0]
 
         for i in unfeas[idx]:
