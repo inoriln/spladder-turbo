@@ -90,3 +90,46 @@ might require to call individual steps differently than how it is done for small
 We provide more detailed information in the section describing how to handle :ref:`Large cohorts
 <spladder_cohorts>`.
 
+Run time, parallel processing and memory
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+**Reading the alignments.** Generating the splicing graph of a sample and quantifying a graph requires
+the coverage and the spliced alignments (introns) of every gene. SplAdder extracts them for a
+complete contig in a single pass over the alignment file and keeps them in memory while the sample is
+processed, instead of reading the alignments gene by gene and step by step. For a human RNA-seq
+sample with about 45 million alignments, this needs roughly 250 MB of additional memory per process.
+The results are identical to the ones obtained by reading the alignments gene by gene. (SplAdder
+still reads gene by gene, if several alignment files are processed together, e.g., with ``--merge-strat
+merge_bams``. With ``--sparse-bam`` the stored summaries of the alignments are used instead.)
+For indexed BAM files (``.bai``), the pass over a contig is done by a compiled reader that
+decompresses the file and decodes the alignments itself; for everything else (CRAM files, indices of
+other formats, alignments with unusual tags, ...) the alignments are read with ``pysam``, which
+gives the same result at a lower speed. Three environment variables control this behavior:
+
+* ``SPLADDER_EVIDENCE_MAX_GB`` limits the memory used for keeping the alignment information
+  (default: 6). If the limit is exceeded, contigs are read again when they are needed.
+* ``SPLADDER_NO_EVIDENCE=1`` switches back to reading the alignments gene by gene.
+* ``SPLADDER_NO_BAMSCAN=1`` reads the alignments with ``pysam`` instead of the compiled reader.
+
+**Parallel processing.** With ``--parallel N``, ``spladder build`` computes the graphs of up to N
+samples at the same time; the processes that are not needed for the samples read the contigs of a
+sample and edit the splice graphs of different contigs in parallel (the splice graphs of a contig do
+not depend on the other contigs). The merged graph is quantified on up to N samples at the same time,
+and the contigs of a sample are counted in parallel as well. The alternative splicing events are
+collected while the graph is quantified (they only depend on the splice graph), and they are
+verified with N processes. For a short time this can add up to more than N processes. The results
+do not depend on the number of processes. If the main process is terminated (e.g., by a job
+scheduler), the worker processes end with it. (Running processes in parallel is only done on Linux;
+elsewhere everything is done one step after the other.) In a compute cluster, the individual steps
+can also be distributed as described in :ref:`Large cohorts <spladder_cohorts>`.
+
+**Linear algebra libraries.** SplAdder only operates on small matrices. Unless the user sets them
+explicitly, the environment variables ``OPENBLAS_NUM_THREADS``, ``OMP_NUM_THREADS`` and
+``MKL_NUM_THREADS`` are set to 1 when the command line tool is started, so that processes do not
+occupy more CPU cores than requested.
+
+**Compiled functions.** Several steps (the reading of BAM files, labelling and editing of the
+splice graphs, the event detection) use functions that are compiled with `numba
+<https://numba.pydata.org>`_ when they are used for the first time (this takes about 15 seconds
+in total). The compiled code is cached, so that it does not have to be compiled again by the
+following runs.
