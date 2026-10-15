@@ -13,7 +13,16 @@ spladder-turbo is meant as a drop-in replacement: the same command line, the sam
 
 ## Performance
 
-The whole workflow of `spladder build` (graph augmentation, merging, quantification, extraction and verification of events), two human RNA-Seq samples ([GSE272028](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE272028), runs SRR29779619 and SRR29779620; aligned with STAR 2.7.7a to hg38, 85 bp reads, about 44 million alignments each), GENCODE v34, whole genome, starting from the GTF file:
+New whole-genome measurement (2026-10-15 to 2026-10-16): two human STAR paired-end samples from [PRJNA312948](https://www.ncbi.nlm.nih.gov/bioproject/PRJNA312948), SRR3184279 and SRR3184280, about 299 million mapped alignments combined, hg38 / GENCODE v34. Both versions run the complete `spladder build` workflow from the GTF, with `--parallel 8 --merge-strat merge_graphs --extract-ase -n 100`:
+
+| | SplAdder 3.1.1 | spladder-turbo 0.1.0 | Speed-up |
+|---|---|---|---|
+| Wall-clock time | 20,262.3 s (5 h 37 min 42 s) | 320.1 s (5 min 20 s) | 63.3 x |
+| CPU time, including child processes | 21,108.3 s | 1,718.3 s | 12.3 x |
+
+Both exit successfully. All 38 output files have equal content, datasets and objects, and the converted annotation objects are equal. Each version ran once on the same shared EPYC 7C13 server, turbo first, without clearing the OS file cache. This is a single measurement; details, exact timings and limits are in [the PRJNA312948 benchmark record](docs/BENCHMARK_PRJNA312948.md).
+
+Historical measurement of the whole workflow of `spladder build` (graph augmentation, merging, quantification, extraction and verification of events), two human RNA-Seq samples ([GSE272028](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE272028), runs SRR29779619 and SRR29779620; aligned with STAR 2.7.7a to hg38, 85 bp reads, about 44 million alignments each), GENCODE v34, whole genome, starting from the GTF file:
 
 | | SplAdder 3.1.1 | spladder-turbo 0.1.0 | |
 |---|---|---|---|
@@ -35,7 +44,7 @@ The new chr20 measurement runs each version once, from the GTF, without an extra
 How to read these numbers:
 
 - Historical measurements used a Linux server with two AMD EPYC 7601 processors (128 threads) and 314 GB of memory, with Python 3.13, numpy 2.3, numba 0.62 and pysam 0.23, timed with `/usr/bin/time -v`. The new chr20 measurement used an EPYC 7C13 server (256 logical CPUs), Python 3.13.9, numpy 2.3.4, numba 0.62.1 and pysam 0.23.3, timed with `validation/benchmark.py`. Do not compare timings across these servers as a speed-up measurement.
-- The whole-genome baseline runs SplAdder in one command with `--parallel 8`. An earlier baseline manually ran the two per-sample graph steps simultaneously: 3 h 04 min 15 s, or 40.5-41.2 x slower than turbo. Both baselines limit the linear algebra libraries to one thread. SplAdder's own `--parallel` only distributes the detection and verification of events.
+- The historical GSE272028 whole-genome baseline runs SplAdder in one command with `--parallel 8`. An earlier baseline manually ran the two per-sample graph steps simultaneously: 3 h 04 min 15 s, or 40.5-41.2 x slower than turbo. Both baselines limit the linear algebra libraries to one thread. SplAdder's own `--parallel` only distributes the detection and verification of events.
 - The speed-up of one process (7.5 x) comes from reading each contig of an alignment file once with a compiled reader, from compiled kernels and from vectorized code. The rest comes from running samples, contigs and event types in parallel processes (Linux only). The CPU time shows how much less work is done in total.
 - The first run compiles numba functions, which takes about half a minute (68 s instead of 40 s for the chr20 run above). The compiled code is cached on disk.
 - With `--parallel 8` the whole-genome run uses about 9 GB in total, in up to about 24 processes at the same time.
@@ -129,7 +138,8 @@ The method: the rules and thresholds for augmenting the splicing graph, the defi
 
 The goal is that every output of `spladder build` has the same content as with SplAdder 3.1.1. What has been compared so far:
 
-- **Whole genome** (the run above): all 38 output files (text, GFF3, HDF5, event files, the splicing graphs of the samples and the merged graph) and the annotation file. 29 of the 38 files are byte-identical (GFF3, HDF5, event and index files), and so is the annotation file. The six compressed text files (`.txt.gz`) differ only in the time stamp in the gzip header; their text is identical. The three graph files (`genes_graph_*.pickle`) differ in their bytes, but they load to completely equal objects.
+- **Whole genome, paired-end STAR data** (PRJNA312948, SRR3184279 and SRR3184280): both versions with `--parallel 8`, all 38 output files have equal content, HDF5 datasets and pickle objects, including both sample graphs, the merged graph, counts, gene expression and all six event types. The converted annotation objects are also equal. See [the full record](docs/BENCHMARK_PRJNA312948.md) for the tested options and limits.
+- **Whole genome** (the historical GSE272028 run): all 38 output files (text, GFF3, HDF5, event files, the splicing graphs of the samples and the merged graph) and the annotation file. 29 of the 38 files are byte-identical (GFF3, HDF5, event and index files), and so is the annotation file. The six compressed text files (`.txt.gz`) differ only in the time stamp in the gzip header; their text is identical. The three graph files (`genes_graph_*.pickle`) differ in their bytes, but they load to completely equal objects.
 - **42 command line configurations** (confidence levels, merge strategies, event types, output formats, sparse BAM files, ...) on the chr20 subset, each run with both programs: identical, or failing in the same way (two configurations fail in SplAdder as well).
 - **More than 50 randomly generated data sets** (random annotations and reads with novel exons, retained introns, alternative sites and mutually exclusive exons), run through both programs, serial and parallel: identical.
 - **The compiled BAM reader** against pysam on every contig of two real samples (678 combinations of contig and filter) and on 800 random BAM files: identical.
@@ -142,7 +152,7 @@ Known differences:
 - With `--parallel`, the output of the parallel tasks is shown one task after the other, and `--logfile` is written per sample.
 - Parallel processing needs Linux; elsewhere everything runs serially (slower, but the same results).
 
-Not validated yet: paired-end data, aligners other than STAR, species other than human, cohorts of more than three samples, CRAM files, `--var-aware`, `--sparse-bam` for a whole genome, and operating systems other than Linux. The code is written to behave like SplAdder in these cases (anything that is not understood falls back to the code of SplAdder), but this has only been tested on small synthetic data. Please compare the outputs of both programs on a small part of your own data before you switch (see [Switching from SplAdder](#switching-from-spladder)), and report differences as issues.
+Not validated yet: aligners other than STAR, species other than human, cohorts of more than three samples, CRAM files, `--var-aware`, `--sparse-bam` for a whole genome, and operating systems other than Linux. Paired-end validation is limited to the two PRJNA312948 samples and options recorded above. The code is written to behave like SplAdder in these cases (anything that is not understood falls back to the code of SplAdder), but this has only been tested on small synthetic data. Please compare the outputs of both programs on a small part of your own data before you switch (see [Switching from SplAdder](#switching-from-spladder)), and report differences as issues.
 
 ## Installation
 
