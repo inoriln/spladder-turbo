@@ -11,6 +11,7 @@ if __name__ == "__main__":
 from .verify import *
 from .write import *
 from ..helpers import compute_psi, codeUTF8
+from ..utils import load_pickle_shared
 
 def _prepare_count_hdf5(options, OUT, event_features, sample_idx=None):
     
@@ -21,10 +22,11 @@ def _prepare_count_hdf5(options, OUT, event_features, sample_idx=None):
         validate_tag = ''
         if options.validate_sg:
             validate_tag = '.validated'
+        ### only the names and positions of the genes are used: the graph loaded for the previous event type can be used again
         if not sample_idx is None:
-            (genes, inserted) = pickle.load(open('%s/spladder/genes_graph_conf%i.%s%s.pickle' % (options.outdir, options.confidence, options.samples[sample_idx], validate_tag), 'rb'))
+            (genes, inserted) = load_pickle_shared('%s/spladder/genes_graph_conf%i.%s%s.pickle' % (options.outdir, options.confidence, options.samples[sample_idx], validate_tag))
         else:
-            (genes, inserted) = pickle.load(open('%s/spladder/genes_graph_conf%i.%s%s.pickle' % (options.outdir, options.confidence, options.merge, validate_tag), 'rb'))
+            (genes, inserted) = load_pickle_shared('%s/spladder/genes_graph_conf%i.%s%s.pickle' % (options.outdir, options.confidence, options.merge, validate_tag))
 
     ### write sample and gene indices to hdf5
     OUT.create_dataset(name='samples', data=codeUTF8(options.samples))

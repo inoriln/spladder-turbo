@@ -10,6 +10,7 @@ from . import settings
 from . import init
 from .init import append_chrms, parse_header
 from .reads import summarize_chr
+from .utils import load_pickle
 
 def prep_annotation(options):
 
@@ -31,7 +32,7 @@ def prep_annotation(options):
 
     ### add anotation contigs into lookup table
     if not hasattr(options, 'genes'):
-        genes = pickle.load(open(options.annotation, 'rb'), encoding='latin1')
+        genes = load_pickle(options.annotation, encoding='latin1')
     else:
         genes = options.genes
     options = init.append_chrms(np.unique(np.array([x.chr for x in genes], dtype='str')), options)

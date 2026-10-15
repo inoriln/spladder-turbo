@@ -10,6 +10,7 @@ import signal as sig
 if __package__ is None:
     __package__ = 'modules.alt_splice'
 
+from .. import parallel
 from ..utils import *
 from ..helpers import log_progress
 from ..classes.segmentgraph import Segmentgraph
@@ -460,11 +461,37 @@ def verify_mutex_exons(event, gene, counts_segments, counts_edges, options):
 
     return (verified, info)
 
+def _is_sorted_ids(ids):
+    """True, if the gene ids (a vector or a column) are in ascending order, i.e., all rows of a gene are neighbours."""
+
+    if ids.ndim == 2 and ids.shape[1] == 1:
+        ids = ids[:, 0]
+    return ids.ndim == 1 and (ids.shape[0] < 2 or bool(np.all(ids[1:] >= ids[:-1])))
+
+
+def _gene_rows(ids, g_idx, is_sorted):
+    """The rows of `ids` that belong to gene g_idx as (rows to select, array of row indices).
+
+    For ascending ids the rows are found by a binary search and can be read as a slice; otherwise all ids are scanned."""
+
+    if is_sorted:
+        flat = ids[:, 0] if ids.ndim == 2 else ids
+        lo = int(np.searchsorted(flat, g_idx, side='left'))
+        hi = int(np.searchsorted(flat, g_idx, side='right'))
+        return slice(lo, hi), np.arange(lo, hi)
+    index = np.where(ids == g_idx)[0]
+    return index, index
+
+
 def verify_wrapper(ev, genes, gidx_min, gene_ids_edges, gene_ids_segs, edge_idx, sample_idx, event_type, fn_count, options, idx):
 
     IN = h5py.File(fn_count, 'r')
     counts = []
     verified = []
+    ### the events are sorted by gene: the counts of a gene are looked up and read only once for all its events
+    cached = None
+    segs_sorted = _is_sorted_ids(gene_ids_segs)
+    edges_sorted = _is_sorted_ids(gene_ids_edges)
     for i in range(ev.shape[0]):
         
         #sys.stdout.write('.')
@@ -487,24 +514,31 @@ def verify_wrapper(ev, genes, gidx_min, gene_ids_edges, gene_ids_segs, edge_idx,
             verified.append([ver for _ in sample_idx])
             continue
 
-        gr_idx_segs = np.where(gene_ids_segs == g_idx)[0]
-        gr_idx_edges = np.where(gene_ids_edges == g_idx)[0]
-        if gr_idx_edges.shape[0] == 0:
+        if cached is None or cached[0] != g_idx:
+            rows_segs, gr_idx_segs = _gene_rows(gene_ids_segs, g_idx, segs_sorted)
+            rows_edges, gr_idx_edges = _gene_rows(gene_ids_edges, g_idx, edges_sorted)
+            if gr_idx_edges.shape[0] == 0:
+                cached = (g_idx, None)
+            else:
+                if isinstance(sample_idx, int):
+                    sample_idx = [sample_idx]
+
+                ### laod relevant count data from HDF5
+                segments = np.atleast_2d(IN['segments'][rows_segs, :])[:, sample_idx]
+                seg_pos = np.atleast_2d(IN['seg_pos'][rows_segs, :])[:, sample_idx]
+                edges = np.atleast_2d(IN['edges'][rows_edges, :])[:, sample_idx]
+                curr_edge_idx = edge_idx[gr_idx_edges]
+                cached = (g_idx, (segments, seg_pos, edges, curr_edge_idx))
+
+        if cached[1] is None:
             ver, info = verify_empty(event_type)
             counts.append(np.array([info]))
             verified.append([ver for _ in sample_idx])
             continue
-
-        if isinstance(sample_idx, int):
-            sample_idx = [sample_idx]
-
-        ### laod relevant count data from HDF5
-        segments = np.atleast_2d(IN['segments'][gr_idx_segs, :])[:, sample_idx]
-        seg_pos = np.atleast_2d(IN['seg_pos'][gr_idx_segs, :])[:, sample_idx]
-        edges = np.atleast_2d(IN['edges'][gr_idx_edges, :])[:, sample_idx]
-        curr_edge_idx = edge_idx[gr_idx_edges]
+        segments, seg_pos, edges, curr_edge_idx = cached[1]
 
         verified.append([])
+        infos = []
         for s_idx in range(len(sample_idx)):
             if event_type == 'exon_skip':
                 ver, info = verify_exon_skip(ev[i], genes[_g_idx], segments[:, s_idx].T,  np.c_[curr_edge_idx, edges[:, s_idx]], options)
@@ -518,10 +552,8 @@ def verify_wrapper(ev, genes, gidx_min, gene_ids_edges, gene_ids_segs, edge_idx,
                 ver, info = verify_mutex_exons(ev[i], genes[_g_idx], segments[:, s_idx].T,  np.c_[curr_edge_idx, edges[:, s_idx]], options)
 
             verified[-1].append(ver)
-            if s_idx == 0:
-                counts.append(info[np.newaxis, :])
-            else:
-                counts[-1] = np.append(counts[-1], info[np.newaxis, :], axis=0) 
+            infos.append(info[np.newaxis, :])
+        counts.append(np.concatenate(infos, axis=0))
         verified[-1] = np.array(verified[-1], dtype='bool')
 
     IN.close()
@@ -529,40 +561,73 @@ def verify_wrapper(ev, genes, gidx_min, gene_ids_edges, gene_ids_segs, edge_idx,
     return (np.dstack(counts), np.dstack(verified), idx)
 
 
+def graph_filenames(options, sample_idx=None):
+    """The files of the splice graph and of its counts that the events are verified with."""
+
+    validate_tag = ''
+    if options.validate_sg:
+        validate_tag = '.validated'
+
+    if options.merge == 'single':
+        name = options.samples[sample_idx]
+    else:
+        name = options.merge
+    return ('%s/spladder/genes_graph_conf%i.%s%s.pickle' % (options.outdir, options.confidence, name, validate_tag),
+            '%s/spladder/genes_graph_conf%i.%s%s.count.hdf5' % (options.outdir, options.confidence, name, validate_tag))
+
+
+def load_count_index(fn_count):
+    """Which gene the rows of the segment and edge counts belong to: (gene_ids_segs, gene_ids_edges, edge_idx).
+
+    They are kept next to the count file in a form that loads quickly, and written when they are needed for the first time.
+    A file that is older than the count file belongs to counts that have been replaced since: it is written again."""
+
+    names = [('gene_ids_segs', '.quick_ids_segs'), ('gene_ids_edges', '.quick_ids_edges'), ('edge_idx', '.quick_edge_idx')]
+    try:
+        count_stamp = os.stat(fn_count).st_mtime_ns
+    except OSError:
+        ### (opening the count file below fails as it always did)
+        count_stamp = None
+    result = []
+    IN = None
+    try:
+        for dataset, suffix in names:
+            fn_quick = fn_count + suffix
+            if count_stamp is not None and os.path.exists(fn_quick) and os.stat(fn_quick).st_mtime_ns >= count_stamp:
+                with open(fn_quick, 'rb') as fd:
+                    result.append(pickle.load(fd))
+            else:
+                if IN is None:
+                    IN = h5py.File(fn_count, 'r')
+                result.append(IN[dataset][:])
+                dump_pickle(result[-1], fn_quick)
+    finally:
+        if IN is not None:
+            IN.close()
+    return tuple(result)
+
+
+def _verify_chunk(c):
+    """verify_wrapper for the events of chunk c, in a worker process of verify_all_events (which hands over the data it works on)."""
+
+    (ev, genes, idx_chunks, gidx_min, gidx_max, gene_ids_edges, gene_ids_segs, edge_idx, sample_idx, event_type, fn_count, options) = parallel.shared()
+    return verify_wrapper(ev[idx_chunks[c]], genes[gidx_min[c]:gidx_max[c]], gidx_min[c], gene_ids_edges, gene_ids_segs, edge_idx, sample_idx, event_type, fn_count, options, c)
+
+
 def verify_all_events(ev, sample_idx=None, list_bam=None, event_type=None, options=None, out_fn=None):
 
     ### verify the events if demanded
     if options.verify_alt_events:
 
-        validate_tag = ''
-        if options.validate_sg:
-            validate_tag = '.validated'
-
-        if options.merge == 'single':
-            (genes, inserted) = pickle.load(open('%s/spladder/genes_graph_conf%i.%s%s.pickle' % (options.outdir, options.confidence, options.samples[sample_idx], validate_tag), 'rb'))
-            fn_count = '%s/spladder/genes_graph_conf%i.%s%s.count.hdf5' % (options.outdir, options.confidence, options.samples[sample_idx], validate_tag)
+        (fn_genes, fn_count) = graph_filenames(options, sample_idx)
+        if options.parallel > 1:
+            ### the worker processes work on copies of the genes: the same graph can be used for all event types
+            (genes, inserted) = load_pickle_shared(fn_genes)
         else:
-            (genes, inserted) = pickle.load(open('%s/spladder/genes_graph_conf%i.%s%s.pickle' % (options.outdir, options.confidence, options.merge, validate_tag), 'rb'))
-            fn_count = '%s/spladder/genes_graph_conf%i.%s%s.count.hdf5' % (options.outdir, options.confidence, options.merge, validate_tag)
+            (genes, inserted) = load_pickle(fn_genes)
 
         ### load count index data from hdf5
-        IN = h5py.File(fn_count, 'r')
-        if os.path.exists(fn_count + '.quick_ids_segs'):
-            gene_ids_segs = pickle.load(open(fn_count + '.quick_ids_segs', 'rb'))
-        else:
-            gene_ids_segs = IN['gene_ids_segs'][:]
-            pickle.dump(gene_ids_segs, open(fn_count + '.quick_ids_segs', 'wb'), -1)
-        if os.path.exists(fn_count + '.quick_ids_edges'):
-            gene_ids_edges = pickle.load(open(fn_count + '.quick_ids_edges', 'rb'))
-        else:
-            gene_ids_edges = IN['gene_ids_edges'][:]
-            pickle.dump(gene_ids_edges, open(fn_count + '.quick_ids_edges', 'wb'), -1)
-        if os.path.exists(fn_count + '.quick_edge_idx'):
-            edge_idx = pickle.load(open(fn_count + '.quick_edge_idx', 'rb'))
-        else:
-            edge_idx = IN['edge_idx'][:]
-            pickle.dump(edge_idx, open(fn_count + '.quick_edge_idx', 'wb'), -1)
-        IN.close()
+        (gene_ids_segs, gene_ids_edges, edge_idx) = load_count_index(fn_count)
 
         ### sort events by gene idx
         gene_idx_all = np.array([x.gene_idx for x in ev])
@@ -572,7 +637,6 @@ def verify_all_events(ev, sample_idx=None, list_bam=None, event_type=None, optio
         old_idx = np.argsort(s_idx)
 
         if options.parallel > 1:
-            pool = mp.Pool(processes=options.parallel, initializer=lambda: sig.signal(sig.SIGINT, sig.SIG_IGN))
             binsize = 50
             maxsize = ev.shape[0]
             idx_chunks = [np.arange(x, min(x + binsize, maxsize)) for x in range(0, maxsize, binsize)]
@@ -581,8 +645,17 @@ def verify_all_events(ev, sample_idx=None, list_bam=None, event_type=None, optio
             gidx_min = [gene_idx_all[cidx][0] for cidx in idx_chunks]   
             gidx_max = [gene_idx_all[cidx][-1] + 1 for cidx in idx_chunks]   
 
+            ### the worker processes see the genes and the count indices as they are now, instead of receiving them with every task
+            pool = parallel.forked_pool(options.parallel, (ev, genes, idx_chunks, gidx_min, gidx_max, gene_ids_edges, gene_ids_segs, edge_idx, sample_idx, event_type, fn_count, options))
+            if pool is None:
+                with frozen_heap():
+                    pool = mp.Pool(processes=options.parallel, initializer=lambda: sig.signal(sig.SIGINT, sig.SIG_IGN))
+                submit = lambda c, cidx: pool.apply_async(verify_wrapper, args=(ev[cidx], genes[gidx_min[c]:gidx_max[c]], gidx_min[c], gene_ids_edges, gene_ids_segs, edge_idx, sample_idx, event_type, fn_count, options, c))
+            else:
+                submit = lambda c, cidx: pool.apply_async(_verify_chunk, args=(c,))
+
             try:
-                result = [pool.apply_async(verify_wrapper, args=(ev[cidx], genes[gidx_min[c]:gidx_max[c]], gidx_min[c], gene_ids_edges, gene_ids_segs, edge_idx, sample_idx, event_type, fn_count, options, c)) for c,cidx in enumerate(idx_chunks)]
+                result = [submit(c, cidx) for c,cidx in enumerate(idx_chunks)]
                 res_cnt = 0
                 while result:
                     tmp = result.pop(0).get()
@@ -594,12 +667,10 @@ def verify_all_events(ev, sample_idx=None, list_bam=None, event_type=None, optio
                 if options.verbose:
                     log_progress(len(idx_chunks), len(idx_chunks))
                     print('')
-                pool.terminate()
-                pool.join()
+                parallel.release_forked_pool(pool)
             except KeyboardInterrupt:
                 print('Keyboard Interrupt - exiting', file=sys.stderr)
-                pool.terminate()
-                pool.join()
+                parallel.release_forked_pool(pool)
                 sys.exit(1)
 
             ### integrate results in list into a coherent results list

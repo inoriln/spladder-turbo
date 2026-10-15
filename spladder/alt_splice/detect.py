@@ -11,10 +11,17 @@ import operator
 import multiprocessing as mp 
 import signal as sig
 
+from .. import parallel
 from ..helpers import log_progress
+from ..utils import frozen_heap, jit_cached
 from functools import reduce
 
-@jit(nopython=True)
+### number of genes handed to a worker process at a time
+DETECT_BINSIZE = 25
+
+_jit = jit_cached
+
+@_jit
 def _detect_multipleskips_fastcore(ix, gene_name, num_exons, edges, labels, edge_limit, idx_multiple_skips, exon_multiple_skips):
 
     # adjecency matrix: upper half only
@@ -163,7 +170,7 @@ def detect_multipleskips(genes, gidx, log=False, edge_limit=300):
 
     return (idx_multiple_skips, exon_multiple_skips)
 
-@jit(nopython=True)
+@_jit
 def _detect_intronreten_fastcore(ix, num_exons, vertices, edges, idx_intron_reten, intron_intron_reten):
 
     introns = np.zeros((0, 2), dtype=np.int64)
@@ -245,7 +252,7 @@ def detect_intronreten(genes, gidx, log=False, edge_limit=1000):
 
     return (idx_intron_reten, intron_intron_reten)
 
-@jit(nopython=True)
+@_jit
 def _detect_exonskips_fast(ix, num_exons, edges, idx_exon_skips, exon_exon_skips):
 
     for exon_idx in range(num_exons - 2): #first exon
@@ -298,7 +305,7 @@ def detect_exonskips(genes, gidx, log=False, edge_limit=1000):
 
     return (idx_exon_skips, exon_exon_skips)
 
-@jit(nopython=True)
+@_jit
 def _detect_altprime_fastcore(ix, num_exons, vertices, edges, strand, idx_alt_5prime, idx_alt_3prime, exon_alt_5prime, exon_alt_3prime):
 
     MIN_OVERLAP = 11 # two exons that are alternative should overlap by at least the length
@@ -443,7 +450,7 @@ def detect_altprime(genes, gidx, log=False, edge_limit=1000):
     return (idx_alt_5prime, exon_alt_5prime, idx_alt_3prime, exon_alt_3prime)
 
 
-@jit(nopython=True)
+@_jit
 def _detect_xorexons_fastcore(ix, gene_name, num_exons, edges, vertices, edge_limit, idx_xor_exons, exon_xor_exons):
     for exon_idx1 in range(num_exons - 3):
         for exon_idx2 in range(exon_idx1 + 1, num_exons - 2):
@@ -519,17 +526,32 @@ def detect_wrapper(genes, event_type, gidx, idx, edge_limit, log=False):
         return (detect_multipleskips(genes, gidx, log, edge_limit), idx)
     
 
+def _detect_chunk(c):
+    """detect_wrapper for the genes of chunk c, in a worker process of detect_events (which hands over the data it works on)."""
+
+    (genes, event_type, idx, idx_chunks, edge_limit) = parallel.shared()
+    return detect_wrapper(genes[idx[idx_chunks[c]]], event_type, idx[idx_chunks[c]], c, edge_limit)
+
+
 def detect_events(genes, event_type, idx, options):
 
     if options.parallel > 1:
-        pool = mp.Pool(processes=options.parallel, initializer=lambda: sig.signal(sig.SIGINT, sig.SIG_IGN))
-        binsize = 3
+        binsize = DETECT_BINSIZE
         maxsize = idx.shape[0]
         idx_chunks = [np.arange(x, min(x + binsize, maxsize)) for x in range(0, maxsize, binsize)]
         result_list = np.empty((len(idx_chunks), ), dtype='object')
 
+        ### the worker processes see the genes as they are now, instead of receiving them with every task
+        pool = parallel.forked_pool(options.parallel, (genes, event_type, idx, idx_chunks, options.detect_edge_limit))
+        if pool is None:
+            with frozen_heap():
+                pool = mp.Pool(processes=options.parallel, initializer=lambda: sig.signal(sig.SIGINT, sig.SIG_IGN))
+            submit = lambda c, cidx: pool.apply_async(detect_wrapper, args=(genes[idx[cidx]], event_type, idx[cidx], c, options.detect_edge_limit))
+        else:
+            submit = lambda c, cidx: pool.apply_async(_detect_chunk, args=(c,))
+
         try:
-            result = [pool.apply_async(detect_wrapper, args=(genes[idx[cidx]], event_type, idx[cidx], c, options.detect_edge_limit)) for c,cidx in enumerate(idx_chunks)]
+            result = [submit(c, cidx) for c,cidx in enumerate(idx_chunks)]
             res_cnt = 0
             while result:
                 tmp = result.pop(0).get()
@@ -540,12 +562,10 @@ def detect_events(genes, event_type, idx, options):
             if options.verbose:
                 log_progress(len(idx_chunks), len(idx_chunks))
                 print('')
-            pool.terminate()
-            pool.join()
+            parallel.release_forked_pool(pool)
         except KeyboardInterrupt:
             print('Keyboard Interrupt - exiting', file=sys.stderr)
-            pool.terminate()
-            pool.join()
+            parallel.release_forked_pool(pool)
             sys.exit(1)
 
         ### integrate results in list into a coherent results list
@@ -561,4 +581,3 @@ def detect_events(genes, event_type, idx, options):
 
     return result_list
  
-

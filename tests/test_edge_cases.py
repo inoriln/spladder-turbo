@@ -111,6 +111,51 @@ def test_empty_alignment_file(tmp_path, capsys):
     assert os.path.exists(str(out / 'spladder' / 'genes_graph_conf3.merge_graphs.pickle'))
 
 
+def _analyze_events_with_nothing_running(tmp_path, monkeypatch, write_files):
+    """spladder_build._analyze_events up to the point where the tasks would start: returns what the preload did."""
+    from types import SimpleNamespace
+    from spladder import parallel, spladder_build
+    loaded = []
+    monkeypatch.setattr(spladder_build, 'load_pickle_shared', lambda *a: loaded.append(a))
+    monkeypatch.setattr(parallel, 'run_shards', lambda *a, **k: iter([]))
+    options = SimpleNamespace(parallel=4, event_types=['exon_skip', 'intron_retention'], verify_alt_events=True, validate_sg=False, merge='merge_graphs',
+                              outdir=str(tmp_path), confidence=3, samples=['a'], bam_fnames=[])
+    os.makedirs(str(tmp_path / 'spladder'))
+    write_files(str(tmp_path / 'spladder' / 'genes_graph_conf3.merge_graphs'))
+    spladder_build._analyze_events([0], options)
+    return loaded, sorted(os.listdir(str(tmp_path / 'spladder')))
+
+
+def test_preload_of_the_verification_tasks_only_reads_what_exists(tmp_path, monkeypatch):
+    ### (the graph is shared by the tasks; with no files it is left to the tasks to fail the way a serial run does)
+    loaded, files = _analyze_events_with_nothing_running(tmp_path, monkeypatch, lambda base: None)
+    assert loaded == [] and files == []
+
+
+def test_preload_of_the_verification_tasks_makes_no_files(tmp_path, monkeypatch):
+    ### the index of the counts is made by a task that has events to verify: runs without events leave the same files, whatever the number of processes
+    import h5py
+
+    def write_files(base):
+        open(base + '.pickle', 'wb').write(b'')
+        with h5py.File(base + '.count.hdf5', 'w') as out:
+            out.create_dataset('gene_ids_segs', data=[0])
+    loaded, files = _analyze_events_with_nothing_running(tmp_path, monkeypatch, write_files)
+    assert len(loaded) == 1
+    assert files == ['genes_graph_conf3.merge_graphs.count.hdf5', 'genes_graph_conf3.merge_graphs.pickle']
+
+
+def test_preload_of_the_verification_tasks_survives_a_graph_that_cannot_be_read(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from spladder import parallel, spladder_build
+    monkeypatch.setattr(parallel, 'run_shards', lambda *a, **k: iter([]))
+    options = SimpleNamespace(parallel=4, event_types=['exon_skip', 'intron_retention'], verify_alt_events=True, validate_sg=False, merge='merge_graphs',
+                              outdir=str(tmp_path), confidence=3, samples=['a'], bam_fnames=[])
+    os.makedirs(str(tmp_path / 'spladder'))
+    open(str(tmp_path / 'spladder' / 'genes_graph_conf3.merge_graphs.pickle'), 'wb').write(b'not a pickle')
+    spladder_build._analyze_events([0], options)
+
+
 def test_graph_plot_with_a_highlighted_range():
     ### (the highlight used a module that was not imported)
     import matplotlib
@@ -182,3 +227,16 @@ def test_preparing_sparse_alignment_files(tmp_path):
     del options.chrm_lookup
     spladder_prep.prep_sparse_bam_filtered(options)
     assert os.path.exists(str(tmp_path / 'syn.conf_3.filt.hdf5'))
+
+
+def test_event_files_are_written_in_one_piece(tmp_path, monkeypatch):
+    ### the file of an event type tells the next run that the type is done: a run that is ended while writing must not leave a part of it
+    from spladder.alt_splice import collect
+    written = []
+    real = collect.dump_pickle
+    monkeypatch.setattr(collect, 'dump_pickle', lambda obj, fname: (written.append(os.path.basename(fname)), real(obj, fname))[1])
+    rng = random.Random(3)
+    genes = [G1, G2]
+    reads = spliced_reads('c1', [(1000, 1300), (3000, 3300), (5000, 5400)], '+', 100, rng) + spliced_reads('c1', [(1000, 1300), (5000, 5400)], '+', 100, rng)
+    build(tmp_path, genes, reads)
+    assert sorted(written) == sorted('merge_graphs_%s_C3.pickle' % t for t in ('exon_skip', 'mult_exon_skip', 'intron_retention', 'alt_3prime', 'alt_5prime', 'mutex_exons'))

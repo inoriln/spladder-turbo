@@ -1,4 +1,10 @@
+import os
 import sys
+
+### SplAdder only works on small matrices: threaded BLAS/OpenMP just burns CPU time (and oversubscribes the
+### cores when several SplAdder processes run side by side); explicit user settings are respected
+for _var in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS'):
+    os.environ.setdefault(_var, '1')
 
 ### check which python version we are running
 if sys.version_info[0] < 3:
