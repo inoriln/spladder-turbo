@@ -7,9 +7,12 @@ import h5py
 import numpy as np
 import re
 
+from . import evidence
+from . import parallel
 from .classes.segmentgraph import Segmentgraph
 from .classes.counts import Counts
 from .helpers import log_progress, decodeUTF8, codeUTF8, get_filename
+from .utils import dump_pickle, load_pickle
 from .reads import *
 from .hdf5 import appendToHDF5
 
@@ -21,6 +24,107 @@ sys.modules['modules.classes.gene'] = cgene
 sys.modules['modules.classes.splicegraph'] = csplicegraph
 sys.modules['modules.classes.segmentgraph'] = csegmentgraph
 ### end fix
+
+def _count_gene(gg, tracks, intron_list, intron_tol):
+    """Counts of the segments (mean coverage, number of covered positions) and the edges (intron read counts) of the segment graph of a gene."""
+
+    segments = gg.segmentgraph.segments
+    counts = Counts(segments.shape[1])
+
+    ### extract mean exon coverage for all segments
+    start = segments[0, :] - gg.start
+    stop = segments[1, :] - gg.start
+    if (type(tracks) is np.ndarray and tracks.dtype == np.float64 and tracks.ndim == 2 and tracks.shape[0] == 1 and
+            segments.shape[1] > 0 and start.min() >= 0 and stop.max() <= tracks.shape[1]):
+        ### the coverage values are integers, so all sums are exact and differences of cumulative sums give the very same means
+        row = tracks[0, :]
+        cum_cov = np.concatenate(([0.0], np.cumsum(row)))
+        cum_pos = np.concatenate(([0], np.cumsum(row > 0)))
+        counts.segments[:] = (cum_cov[stop] - cum_cov[start]) / (stop - start)
+        counts.seg_pos[:] = cum_pos[stop] - cum_pos[start]
+    else:
+        for j in range(segments.shape[1]):
+            idx = np.arange(segments[0, j], segments[1, j]) - gg.start
+            counts.segments[j] = np.mean(np.sum(tracks[:, idx], axis=0))
+            counts.seg_pos[j] = np.sum(np.sum(tracks[:, idx], axis=0) > 0)
+
+    k, l = np.where(gg.segmentgraph.seg_edges == 1)
+    if k.shape[0] == 0:
+        return counts
+    flat = np.ravel_multi_index((k, l), gg.segmentgraph.seg_edges.shape)
+
+    ### there are no introns to count
+    if intron_list.shape[0] == 0:
+        counts.edges = np.c_[flat, np.zeros_like(flat)]
+        return counts
+
+    ### extract intron counts 
+    if (intron_tol == 0 and intron_list.dtype == np.uint32 and intron_list.ndim == 2 and segments.min() >= 0 and segments.max() < 2 ** 31 and
+            intron_list[:, :2].max() < 2 ** 31):
+        ### introns that start at the end of the donor segment and end at the start of the acceptor segment; the counts of identical introns add up
+        intron_key = intron_list[:, 0].astype('int64') * 2 ** 32 + intron_list[:, 1].astype('int64')
+        unique_key, inverse = np.unique(intron_key, return_inverse=True)
+        total = np.bincount(inverse.ravel(), weights=intron_list[:, 2].astype('float64'))
+        edge_key = segments[1, k].astype('int64') * 2 ** 32 + segments[0, l].astype('int64')
+        pos = np.minimum(np.searchsorted(unique_key, edge_key), unique_key.shape[0] - 1)
+        found = unique_key[pos] == edge_key
+        if found.any():
+            ### summing up the integer counts gives unsigned integers, which turn the edge counts into floats
+            counts.edges = np.c_[flat.astype('float64'), np.where(found, total[pos], 0.0)]
+        else:
+            counts.edges = np.c_[flat, np.zeros_like(flat)]
+        return counts
+
+    for m in range(k.shape[0]):
+        idx = np.where((np.absolute(intron_list[:, 0] - segments[1, k[m]]) <= intron_tol) & (np.absolute(intron_list[:, 1] - segments[0, l[m]]) <= intron_tol))[0]
+        if idx.shape[0] > 0:
+            row = np.atleast_2d(np.array([flat[m], np.sum(intron_list[idx, 2])]))
+        else:
+            row = np.atleast_2d(np.array([flat[m], 0]))
+        counts.edges = row if counts.edges.shape[0] == 0 else np.r_[counts.edges, row]
+    return counts
+
+
+def _count_contig(genes, contig, contig_idx, fn_bam, options, intron_tol, result):
+    """Counts the genes at positions contig_idx (all on `contig`): result[i] is what is counted for gene i."""
+
+    bam_cache = dict()
+    print('\ncounting %i genes on contig %s' % (contig_idx.shape[0], contig))
+    for ii,i in enumerate(contig_idx):
+        log_progress(ii, contig_idx.shape[0], 50)
+        gg = genes[i]
+        if gg.segmentgraph.is_empty():
+            gg.segmentgraph = Segmentgraph(gg)
+        gg.start = gg.segmentgraph.segments.ravel().min()
+        gg.stop = gg.segmentgraph.segments.ravel().max()
+
+        if options.sparse_bam and \
+          (fn_bam.endswith('npz') or \
+           os.path.exists(re.sub(r'\.[bB][aA][mM]|\.[cC][rR][aA][mM]$', '', fn_bam) + '.npz') or \
+           fn_bam.endswith('hdf5') or \
+           os.path.exists(re.sub(r'\.[bB][aA][mM]|\.[cC][rR][aA][mM]$', '', fn_bam) + '.hdf5')):
+            ### make sure that we query the right contig from cache
+            assert(gg.chr == contig)
+            (tracks, intron_list) = add_reads_from_sparse_bam(gg, fn_bam, contig, options.confidence, types=['exon_track','intron_list'], filter=None, cache=bam_cache)
+        else:
+            ### add RNA-seq evidence to the gene structure
+            (tracks, intron_list) = add_reads_from_bam(gg, fn_bam, ['exon_track','intron_list'], None, options.var_aware, options.primary_only, mm_tag=options.mm_tag, cram_ref=options.ref_genome);
+            intron_list = intron_list[0] ### TODO
+
+        result[i] = _count_gene(gg, tracks, intron_list, intron_tol)
+
+
+def _count_shard(task):
+    """The counts of the genes of one shard (the work of a worker process of count_graph_coverage)."""
+
+    genes, fn_bam, options, intron_tol, shards = parallel.shared()
+    pos = shards[task]
+    contigs = np.array([genes[i].chr for i in pos])
+    result = dict()
+    for contig in np.unique(contigs):
+        _count_contig(genes, contig, pos[contigs == contig], fn_bam, options, intron_tol, result)
+    return result
+
 
 def count_graph_coverage(genes, fn_bam=None, options=None, fn_out=None):
 
@@ -43,71 +147,35 @@ def count_graph_coverage(genes, fn_bam=None, options=None, fn_out=None):
     intron_tol = 0 
 
     sys.stdout.write('genes: %i\n' % genes.shape[0])
-    for f in range(counts.shape[0]):
-        sys.stdout.write('\nsample %i/%i\n' % (f + 1, counts.shape[0])) 
+    ### read evidence of the contigs is extracted in a single pass instead of once per gene
+    with evidence.evidence_scope() as scope:
+        for f in range(counts.shape[0]):
+            sys.stdout.write('\nsample %i/%i\n' % (f + 1, counts.shape[0])) 
 
-        ### iterate over all genes and generate counts for
-        ### the segments in the segment graph
-        ### and the splice junctions in the splice graph
-        ### iterate per contig, so the bam caching works better
-        contigs = np.array([x.chr for x in genes])
-        for contig in np.unique(contigs):
-            contig_idx = np.where(contigs == contig)[0]
-            bam_cache = dict()
-            print('\ncounting %i genes on contig %s' % (contig_idx.shape[0], contig))
-            for ii,i in enumerate(contig_idx):
-                log_progress(ii, contig_idx.shape[0], 50)
-                gg = genes[i]
-                if gg.segmentgraph.is_empty():
-                    gg.segmentgraph = Segmentgraph(gg)
-                gg.start = gg.segmentgraph.segments.ravel().min()
-                gg.stop = gg.segmentgraph.segments.ravel().max()
-
-                counts[f, i] = Counts(gg.segmentgraph.segments.shape[1])
-
-                if options.sparse_bam and \
-                  (fn_bam[f].endswith('npz') or \
-                   os.path.exists(re.sub(r'\.[bB][aA][mM]|\.[cC][rR][aA][mM]$', '', fn_bam[f]) + '.npz') or \
-                   fn_bam[f].endswith('hdf5') or \
-                   os.path.exists(re.sub(r'\.[bB][aA][mM]|\.[cC][rR][aA][mM]$', '', fn_bam[f]) + '.hdf5')):
-                    ### make sure that we query the right contig from cache
-                    assert(gg.chr == contig)
-                    (tracks, intron_list) = add_reads_from_sparse_bam(gg, fn_bam[f], contig, options.confidence, types=['exon_track','intron_list'], filter=None, cache=bam_cache)
-                else:
-                    ### add RNA-seq evidence to the gene structure
-                    (tracks, intron_list) = add_reads_from_bam(gg, fn_bam[f], ['exon_track','intron_list'], None, options.var_aware, options.primary_only, mm_tag=options.mm_tag, cram_ref=options.ref_genome);
-                    intron_list = intron_list[0] ### TODO
-
-                ### extract mean exon coverage for all segments
-                for j in range(gg.segmentgraph.segments.shape[1]):
-                    idx = np.arange(gg.segmentgraph.segments[0, j], gg.segmentgraph.segments[1, j]) - gg.start
-                    counts[f, i].segments[j] = np.mean(np.sum(tracks[:, idx], axis=0))
-                    counts[f, i].seg_pos[j] = np.sum(np.sum(tracks[:, idx], axis=0) > 0)
-
-                k, l = np.where(gg.segmentgraph.seg_edges == 1)
-
-                ### there are no introns to count
-                if intron_list.shape[0] == 0:
-                    for m in range(k.shape[0]):
-                        if counts[f, i].edges.shape[0] == 0:
-                            counts[f, i].edges = np.atleast_2d(np.array([np.ravel_multi_index([k[m], l[m]], gg.segmentgraph.seg_edges.shape), 0]))
-                        else:
-                            counts[f, i].edges = np.r_[counts[f, i].edges, np.atleast_2d(np.array([np.ravel_multi_index([k[m], l[m]], gg.segmentgraph.seg_edges.shape), 0]))]
-                    continue
-
-                ### extract intron counts 
-                for m in range(k.shape[0]):
-                    idx = np.where((np.absolute(intron_list[:, 0] - gg.segmentgraph.segments[1, k[m]]) <= intron_tol) & (np.absolute(intron_list[:, 1] - gg.segmentgraph.segments[0, l[m]]) <= intron_tol))[0]
-                    if counts[f, i].edges.shape[0] == 0:
-                        if idx.shape[0] > 0:
-                            counts[f, i].edges = np.atleast_2d(np.array([np.ravel_multi_index([k[m], l[m]], gg.segmentgraph.seg_edges.shape), np.sum(intron_list[idx, 2])]))
-                        else:
-                            counts[f, i].edges = np.atleast_2d(np.array([np.ravel_multi_index([k[m], l[m]], gg.segmentgraph.seg_edges.shape), 0]))
-                    else:
-                        if idx.shape[0] > 0:
-                            counts[f, i].edges = np.r_[counts[f, i].edges, np.atleast_2d(np.array([np.ravel_multi_index([k[m], l[m]], gg.segmentgraph.seg_edges.shape), np.sum(intron_list[idx, 2])]))]
-                        else:
-                            counts[f, i].edges = np.r_[counts[f, i].edges, np.atleast_2d(np.array([np.ravel_multi_index([k[m], l[m]], gg.segmentgraph.seg_edges.shape), 0]))]
+            ### iterate over all genes and generate counts for
+            ### the segments in the segment graph
+            ### and the splice junctions in the splice graph
+            ### iterate per contig, so the bam caching works better
+            contigs = np.array([x.chr for x in genes])
+            if options.parallel > 1 and parallel.can_fork() and not options.sparse_bam and np.unique(contigs).shape[0] > 1:
+                ### the genes of different contigs are counted in different processes
+                ### (every process reads the contigs it counts itself: nothing has to be sent around)
+                groups = [(contig, np.where(contigs == contig)[0]) for contig in np.unique(contigs)]
+                workers = min(options.parallel, len(groups))
+                shards = parallel.balanced_shards(groups, workers)
+                for result in parallel.run_shards(_count_shard, (genes, fn_bam[f], options, intron_tol, shards), len(shards), workers):
+                    for i in result:
+                        counts[f, i] = result[i]
+                ### what counting leaves behind in the genes
+                for gg in genes:
+                    if gg.segmentgraph.is_empty():
+                        gg.segmentgraph = Segmentgraph(gg)
+                    gg.start = gg.segmentgraph.segments.ravel().min()
+                    gg.stop = gg.segmentgraph.segments.ravel().max()
+            else:
+                evidence.prefetch_contigs(scope, fn_bam[f], [gene.chr for gene in genes], None, options)
+                for contig in np.unique(contigs):
+                    _count_contig(genes, contig, np.where(contigs == contig)[0], fn_bam[f], options, intron_tol, counts[f])
 
     if fn_out is not None:
         pickle.dump(counts, open(fn_out, 'wb'), -1)
@@ -115,9 +183,57 @@ def count_graph_coverage(genes, fn_bam=None, options=None, fn_out=None):
         return counts
 
 
+def _collect_counts_by_gene(counts_tmp, counts):
+    """The counts of every gene put together gene by gene (the original way, used for what _collect_counts does not handle)."""
+
+    for c in range(counts_tmp.shape[1]):
+        counts['segments'].append(np.hstack([np.atleast_2d(x.segments).T for x in counts_tmp[:, c]]))
+        counts['seg_pos'].append(np.hstack([np.atleast_2d(x.seg_pos).T for x in counts_tmp[:, c]]))
+        counts['gene_ids_segs'].append(np.ones((np.atleast_2d(counts_tmp[0, c].seg_pos).shape[1], 1), dtype='int') * c)
+        tmp = [np.atleast_2d(x.edges) for x in counts_tmp[:, c] if x.edges.shape[0] > 0]
+        if len(tmp) == 0:
+            continue
+        tmp = np.hstack(tmp)
+        if tmp.shape[0] > 0:
+            counts['edges'].append(np.c_[tmp[:, 0], tmp[:, np.arange(1, tmp.shape[1], 2)]])
+            counts['gene_ids_edges'].append(np.ones((tmp.shape[0], 1), dtype='int') * c)
+
+
+def _collect_counts(counts_tmp, counts):
+    """Puts the counts of all genes (counts_tmp[sample, gene]) together: one matrix with a row per segment / edge, a column per sample.
+
+    The lists in `counts` get the matrices of the genes in one piece instead of one per gene, which gives the same result."""
+
+    n_samples, n_genes = counts_tmp.shape
+    rows = [list(counts_tmp[s, :]) for s in range(n_samples)]
+    if n_samples == 0 or n_genes == 0:
+        _collect_counts_by_gene(counts_tmp, counts)
+        return
+    ### every sample has counted the same segments and edges of a gene, arrays of the usual shapes
+    n_segments = [x.segments.shape[0] for x in rows[0]]
+    n_edges = [x.edges.shape[0] for x in rows[0]]
+    usual = all(type(x.segments) is np.ndarray and type(x.seg_pos) is np.ndarray and type(x.edges) is np.ndarray and x.segments.ndim == 1 and x.seg_pos.ndim == 1 and
+                x.edges.ndim == 2 and x.edges.shape[1] == 2 and x.segments.shape[0] == x.seg_pos.shape[0] for r in rows for x in r)
+    usual = usual and all([x.segments.shape[0] for x in r] == n_segments and [x.edges.shape[0] for x in r] == n_edges for r in rows)
+    if not usual:
+        _collect_counts_by_gene(counts_tmp, counts)
+        return
+
+    n_segments = np.array(n_segments)
+    n_edges = np.array(n_edges)
+    counts['segments'].append(np.stack([np.concatenate([x.segments for x in r]) for r in rows], axis=1))
+    counts['seg_pos'].append(np.stack([np.concatenate([x.seg_pos for x in r]) for r in rows], axis=1))
+    counts['gene_ids_segs'].append(np.repeat(np.arange(n_genes, dtype='int'), n_segments)[:, np.newaxis])
+    with_edges = np.flatnonzero(n_edges > 0)
+    if with_edges.shape[0] > 0:
+        edges = [np.concatenate([r[c].edges for c in with_edges]) for r in rows]
+        counts['edges'].append(np.column_stack([edges[0][:, 0]] + [e[:, 1] for e in edges]))
+        counts['gene_ids_edges'].append(np.repeat(with_edges.astype('int'), n_edges[with_edges])[:, np.newaxis])
+
+
 def count_graph_coverage_wrapper(fname_in, fname_out, bam_fnames, options, sample_idx=None, qmode='all'):
 
-    (genes, inserted) = pickle.load(open(fname_in, 'rb')) 
+    (genes, inserted) = load_pickle(fname_in)
     for g in genes:
         g.from_sparse()
     
@@ -125,7 +241,7 @@ def count_graph_coverage_wrapper(fname_in, fname_out, bam_fnames, options, sampl
         for g in genes:
             g.segmentgraph = Segmentgraph(g)
             g.to_sparse()
-        pickle.dump((genes, inserted), open(fname_in, 'wb'), -1)
+        dump_pickle((genes, inserted), fname_in)
         for g in genes:
             g.from_sparse()
 
@@ -144,6 +260,13 @@ def count_graph_coverage_wrapper(fname_in, fname_out, bam_fnames, options, sampl
     elif options.merge == 'merge_graphs' and qmode == 'single':
         print('\nquantifying merged graph in single mode (first file only) on %s' % options.samples[0])
         counts_tmp = count_graph_coverage(genes, bam_fnames[0], options)
+    elif parallel.can_run_parallel(options, options.samples.shape[0]):
+        ### the samples are counted independently of each other
+        for s_idx, counts_sample in enumerate(parallel.count_samples(genes, bam_fnames[:options.samples.shape[0]], options, count_graph_coverage)):
+            if s_idx == 0:
+                counts_tmp = counts_sample
+            else:
+                counts_tmp = np.r_[np.atleast_2d(counts_tmp), counts_sample]
     else:
         for s_idx in range(options.samples.shape[0]):
             print('\n%i/%i' % (s_idx + 1, options.samples.shape[0]))
@@ -152,17 +275,7 @@ def count_graph_coverage_wrapper(fname_in, fname_out, bam_fnames, options, sampl
             else:
                 counts_tmp = np.r_[np.atleast_2d(counts_tmp), count_graph_coverage(genes, bam_fnames[s_idx], options)]
 
-    for c in range(counts_tmp.shape[1]):
-        counts['segments'].append(np.hstack([np.atleast_2d(x.segments).T for x in counts_tmp[:, c]]))
-        counts['seg_pos'].append(np.hstack([np.atleast_2d(x.seg_pos).T for x in counts_tmp[:, c]]))
-        counts['gene_ids_segs'].append(np.ones((np.atleast_2d(counts_tmp[0, c].seg_pos).shape[1], 1), dtype='int') * c)
-        tmp = [np.atleast_2d(x.edges) for x in counts_tmp[:, c] if x.edges.shape[0] > 0]
-        if len(tmp) == 0:
-            continue
-        tmp = np.hstack(tmp)
-        if tmp.shape[0] > 0:
-            counts['edges'].append(np.c_[tmp[:, 0], tmp[:, np.arange(1, tmp.shape[1], 2)]])
-            counts['gene_ids_edges'].append(np.ones((tmp.shape[0], 1), dtype='int') * c)
+    _collect_counts(counts_tmp, counts)
 
     ### write result data to hdf5
     for key in counts:
@@ -220,7 +333,7 @@ def compute_gene_expression(options, fname_genes, fname_count_in, fn_out=None, s
         sys.stdout.write('\nQuantifying gene expression ...\n')
 
     ### load gene information
-    genes = pickle.load(open(fname_genes, 'rb'), encoding='latin1')[0]
+    genes = load_pickle(fname_genes, encoding='latin1')[0]
     numgenes = genes.shape[0]
 
     ### open hdf5 file containing graph count information
@@ -236,6 +349,8 @@ def compute_gene_expression(options, fname_genes, fname_count_in, fn_out=None, s
 
     seg_lens = IN['seg_len'][:]
     gene_ids_segs = IN['gene_ids_segs'][:].astype('int')
+    ### read once, instead of for every single gene
+    gene_names = IN['gene_names'][:]
 
     ### no longer assume that the gene_ids_segs are sorted by gene ID
     s_idx = np.argsort(gene_ids_segs[:, 0], kind='mergesort')
@@ -264,7 +379,7 @@ def compute_gene_expression(options, fname_genes, fname_count_in, fn_out=None, s
         if len(gene_idx.shape) > 0:
             gene_idx = gene_idx[0]
 
-        assert(decodeUTF8(IN['gene_names'][:][gene_idx]) == genes[gidx].name)
+        assert(decodeUTF8(gene_names[gene_idx]) == genes[gidx].name)
         assert(genes[gidx].name == gene_ids[gidx])
 
         if seg_idx.shape[0] > 1:

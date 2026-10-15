@@ -64,7 +64,7 @@ def merge_duplicate_exons(genes, options):
     return genes
 
 
-def merge_genes_by_splicegraph(options, merge_list=None, fn_out=None):
+def merge_genes_by_splicegraph(options, merge_list=None, fn_out=None, segment_graphs=False):
     #
     #   This script takes several gene structures and merges them into one. 
     #   the merge is based on the splicegraphs within the genes struct
@@ -86,7 +86,7 @@ def merge_genes_by_splicegraph(options, merge_list=None, fn_out=None):
     for i in range(len(merge_list)):
         ### load gene structure from sample i
         print('Loading %s ...' % merge_list[i])
-        (genes, inserted) = pickle.load(open(merge_list[i], 'rb'))
+        (genes, inserted) = load_pickle(merge_list[i])
         for g in genes:
             g.from_sparse()
         print('... done (%i / %i)' % (i + 1, len(merge_list)))
@@ -205,7 +205,8 @@ def merge_genes_by_splicegraph(options, merge_list=None, fn_out=None):
 
     for g in genes:
         g.label_alt()
-        if not g.segmentgraph.is_empty():
+        ### the quantification needs the segment graphs: if the graphs are not changed after the merge, they can be made here once
+        if segment_graphs or not g.segmentgraph.is_empty():
             g.segmentgraph = Segmentgraph(g)
         g.to_sparse()
 
@@ -215,7 +216,13 @@ def merge_genes_by_splicegraph(options, merge_list=None, fn_out=None):
     genes = genes[s1_idx[s2_idx]]
 
     print('Store genes at: %s' % fn_out)
-    pickle.dump((genes, inserted), open(fn_out, 'wb'), -1)
+    dump_pickle((genes, inserted), fn_out)
+
+
+def _segment_graphs_wanted(options):
+    """The merged graph is quantified next and not changed any more (the validation of the graph changes it): its segment graphs are made with the merge."""
+
+    return bool(options.quantify_graph) and not options.validate_sg
 
 
 def run_merge(samples, options):
@@ -240,7 +247,8 @@ def run_merge(samples, options):
                 merge_list = np.array(sorted(glob.glob('%s/spladder/genes_graph_conf%i.%s_level%i_chunk*.pickle' % (options.outdir, options.confidence, options.merge, curr_level - 1))))
             chunk_end = min(len(merge_list), chunk_end)
 
-            if curr_level == max_level:
+            final = curr_level == max_level
+            if final:
                 assert len(merge_list) <= options.chunksize, 'chunksize is %i but merge_list has length %i with: %s' % (options.chunksize, len(merge_list), str(merge_list))
                 fn = fn_out
             else:
@@ -250,10 +258,10 @@ def run_merge(samples, options):
                 print('%s already exists' % fn)
                 return
             print('merging level %i chunk %i to %i' % (curr_level, chunk_start, chunk_end))
-            merge_genes_by_splicegraph(options, merge_list=merge_list[chunk_start:chunk_end], fn_out=fn)
+            merge_genes_by_splicegraph(options, merge_list=merge_list[chunk_start:chunk_end], fn_out=fn, segment_graphs=final and _segment_graphs_wanted(options))
         else:
             merge_list = np.array(['%s/spladder/genes_graph_conf%i.%s.pickle' % (options.outdir, options.confidence, x) for x in samples])
-            merge_genes_by_splicegraph(options, merge_list=merge_list, fn_out=fn_out)
+            merge_genes_by_splicegraph(options, merge_list=merge_list, fn_out=fn_out, segment_graphs=_segment_graphs_wanted(options))
     else:
         print('File %s already exists!' % fn_out)
 
