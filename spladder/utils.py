@@ -1,4 +1,97 @@
+import contextlib
+import gc
+import os
+import pickle
+import uuid
+
 import numpy as np
+
+def jit_cached(fn):
+    """Compiles the function with numba and caches the machine code on disk, so that it is not compiled again in every process."""
+
+    from numba import jit
+    try:
+        return jit(nopython=True, cache=True)(fn)
+    except RuntimeError:
+        ### no writable location for the cache
+        return jit(nopython=True)(fn)
+
+
+def load_pickle(fname, **kwargs):
+    """pickle.load of a file with very many small objects (the splice graphs of all genes) with the garbage collector paused.
+
+    Creating that many objects triggers collections of an ever growing heap, which about doubles the loading time.
+    There is no garbage in the loaded data, so the objects are exactly the same."""
+
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        with open(fname, 'rb') as fd:
+            return pickle.load(fd, **kwargs)
+    finally:
+        if enabled:
+            gc.enable()
+
+
+def dump_pickle(obj, fname):
+    """pickle.dump to a file with the garbage collector paused (saves about a third of the time).
+
+    The file is written in one piece: a process reading the file while it is written gets the old or the complete new one."""
+
+    target = os.path.realpath(fname)
+    ### (processes on different hosts writing to the same directory can have the same process id)
+    fname_tmp = '%s.tmp%s' % (target, uuid.uuid4().hex[:12])
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        try:
+            fd = open(fname_tmp, 'wb')
+        except OSError:
+            ### no place for a temporary file: write the file itself
+            with open(target, 'wb') as fd:
+                pickle.dump(obj, fd, -1)
+            return
+        try:
+            with fd:
+                pickle.dump(obj, fd, -1)
+            os.replace(fname_tmp, target)
+        except BaseException:
+            if os.path.exists(fname_tmp):
+                os.remove(fname_tmp)
+            raise
+    finally:
+        if enabled:
+            gc.enable()
+
+
+### the file loaded last by load_pickle_shared: (identity of the file, content)
+_SHARED = [None, None]
+
+def load_pickle_shared(fname, **kwargs):
+    """Like load_pickle, but a file that was loaded by this process before and has not changed since is not read again.
+
+    All callers get the same object: it must only be read (or copied by forked processes)."""
+
+    st = os.stat(fname)
+    key = (os.path.abspath(fname), st.st_mtime_ns, st.st_size, st.st_ino, tuple(sorted(kwargs.items())))
+    if _SHARED[0] != key:
+        ### only one file at a time: the graphs are large
+        _SHARED[0], _SHARED[1] = None, None
+        _SHARED[1] = load_pickle(fname, **kwargs)
+        _SHARED[0] = key
+    return _SHARED[1]
+
+
+@contextlib.contextmanager
+def frozen_heap():
+    """Processes forked inside of this context do not collect (and thereby copy) the objects the parent process holds."""
+
+    gc.freeze()
+    try:
+        yield
+    finally:
+        gc.unfreeze()
+
 
 def isequal(A, B):
     
@@ -60,9 +153,10 @@ def unique_rows(array, index = None):
             return array
 
     (array_s, s_idx) = sort_rows(array, True)
-    tmp = [False]
-    tmp.extend([np.all(array_s[i-1, :] == array_s[i, :]) for i in range(1, array.shape[0])])
-    k_idx = np.where(~np.array(tmp, dtype='bool'))[0]
+    ### keep the first of every group of identical (neighbouring) rows
+    keep = np.ones((array.shape[0],), dtype='bool')
+    keep[1:] = ~np.all(array_s[1:, :] == array_s[:-1, :], axis=1)
+    k_idx = np.where(keep)[0]
 
     if index == True:
         return (array[s_idx[k_idx], :], s_idx[k_idx])
@@ -115,7 +209,7 @@ def ismember(element, array, rows=False):
     """Check if element is member of array"""
 
     if rows:
-        return np.any([np.all(array[x, :] == element) for x in range(array.shape[0])])
+        return np.any(np.all(array == element, axis=1))
     else:
         return np.all([element[i] in array for i in element.shape[0]])
 
