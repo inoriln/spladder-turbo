@@ -130,6 +130,6 @@ occupy more CPU cores than requested.
 
 **Compiled functions.** Several steps (the reading of BAM files, labelling and editing of the
 splice graphs, the event detection) use functions that are compiled with `numba
-<https://numba.pydata.org>`_ when they are used for the first time (this takes about 15 seconds
-in total). The compiled code is cached, so that it does not have to be compiled again by the
+<https://numba.pydata.org>`_ when they are used for the first time (this takes about half a
+minute in total). The compiled code is cached, so that it does not have to be compiled again by the
 following runs.
