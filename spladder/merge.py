@@ -125,11 +125,11 @@ def merge_genes_by_splicegraph(options, merge_list=None, fn_out=None):
                 if j % 1000 == 0:
                     print('%i/%i' % (j, genes.shape[0]))
             g_idx_ = g_idx
-            while (g_idx <= genes2.shape[0] and genes2[g_idx].name < genes[j].name):
+            while (g_idx < genes2.shape[0] and genes2[g_idx].name < genes[j].name):
                 g_idx += 1
 
             # same gene
-            if g_idx <= genes2.shape[0] and genes2[g_idx].name == genes[j].name:
+            if g_idx < genes2.shape[0] and genes2[g_idx].name == genes[j].name:
                 
                 tmp, s_idx = sort_rows(genes[j].splicegraph.vertices.T, index=True) 
                 genes[j].splicegraph.vertices = tmp.T
@@ -192,9 +192,9 @@ def merge_genes_by_splicegraph(options, merge_list=None, fn_out=None):
 
 
             ### we did not find the gene name --> append new gene to genes2
-            elif g_idx > genes2.shape[0] or genes2[g_idx].name > genes[j].name:
+            else:
                 g_idx = g_idx_
-                genes2 = np.c_[genes2, genes[j]]
+                genes2 = np.append(genes2, genes[j])
                 genes2[-1].edge_count = genes[j].splicegraph.edges
                 appended = True
         print('... done\n')

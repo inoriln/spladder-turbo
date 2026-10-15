@@ -173,10 +173,12 @@ def count_graph_coverage_wrapper(fname_in, fname_out, bam_fnames, options, sampl
     h5fid.create_dataset(name='samples', data=codeUTF8(options.samples))
     h5fid['strains'] = h5py.SoftLink('/samples')
     for key in counts:
-        if np.issubdtype(counts[key].dtype, np.str_):
-            h5fid.create_dataset(name=key, data=codeUTF8(counts[key]))
+        ### (a list is left, if no gene has any edge)
+        data = np.asarray(counts[key])
+        if np.issubdtype(data.dtype, np.str_):
+            h5fid.create_dataset(name=key, data=codeUTF8(data))
         else:
-            h5fid.create_dataset(name=key, data=counts[key])
+            h5fid.create_dataset(name=key, data=data)
     h5fid.close()
 
 def collect_single_quantification_results(fname_out, sample_idxs, options):
@@ -320,7 +322,7 @@ def get_size_factors(gene_counts, options, kind='geomean'):
             size_factors.append(gene_counts[:, i].sum() / 100000000) 
     elif kind == 'uq': # upper quartile
         for i in range(gene_counts.shape[1]):
-            size_factors.append(scoreatpercentile(gene_counts[:, i], 75) + 1) 
+            size_factors.append(np.percentile(gene_counts[:, i], 75) + 1) 
     else:
         sys.stderr.write('ERROR: unknown normalization method %s\n' % kind)
         sys.exit(1)

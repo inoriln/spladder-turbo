@@ -192,10 +192,17 @@ def compute_psi(counts, event_type, options):
     return (psi, a, b)
 
 
+### start of the progress shown by log_progress
+TIME0 = time.time()
+
+
 def log_progress(idx, total, bins=50):
     
     global TIME0
 
+    ### (nothing to report, if there is nothing to do)
+    if total <= 0:
+        return
     #binsize = max(total / bins, 1)
     binsize = bins / total
     time1 = time.time()

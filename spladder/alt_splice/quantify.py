@@ -325,7 +325,7 @@ def quantify_from_counted_events(event_fn, sample_idx1=None, sample_idx2=None, e
             pos0e = [IN['event_pos'][:, [2, 3]].astype('int')]
             pos1e = [IN['event_pos'][:, [4, 5]].astype('int')]
     else:
-        raise Error('Event type %s either not known or not implemented for testing yet' % event_type)
+        raise ValueError('Event type %s either not known or not implemented for testing yet' % event_type)
 
     ### init coverage matrix
     cov = [np.zeros((conf_idx.shape[0], sample_idx1.shape[0] + sample_idx2.shape[0]), dtype='float'), np.zeros((conf_idx.shape[0], sample_idx1.shape[0] + sample_idx2.shape[0]), dtype='float')]
@@ -530,7 +530,7 @@ def get_event_ids(IN, event_type, event_idx, options):
         tmp1 = np.c_[gene_chr, event_pos[:, [0, 1, 3]]]
         tmp2 = np.c_[gene_chr, event_pos[:, [0, 2, 3]]]
     else:
-        raise Error('Event type %s either not known or not implemented for testing yet' % event_type)
+        raise ValueError('Event type %s either not known or not implemented for testing yet' % event_type)
 
     event_ids0 = np.array([':'.join(tmp1[i, :]) for i in range(tmp1.shape[0])], dtype='str')
     event_ids1 = np.array([':'.join(tmp2[i, :]) for i in range(tmp2.shape[0])], dtype='str')

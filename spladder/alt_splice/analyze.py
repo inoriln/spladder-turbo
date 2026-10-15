@@ -16,7 +16,7 @@ def _prepare_count_hdf5(options, OUT, event_features, sample_idx=None):
     
     ### load gene info
     if hasattr(options, 'spladderfile') and os.path.exists(options.spladderfile):
-        (genes, inserted) = pickle.load(open(options.spladderfile), 'rb')
+        (genes, inserted) = pickle.load(open(options.spladderfile, 'rb'))
     else:
         validate_tag = ''
         if options.validate_sg:

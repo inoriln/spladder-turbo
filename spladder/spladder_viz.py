@@ -19,6 +19,7 @@ from .viz.coverage import *
 from .viz.genelets import *
 from .viz import axes as vax
 from .helpers import decodeUTF8
+from .count import compute_gene_expression
 from .helpers_viz import *
 
 ### intermediate fix to load pickle files stored under previous version

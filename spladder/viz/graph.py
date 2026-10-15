@@ -87,7 +87,7 @@ def plot_graph(vertices, edges, ax, xlim=None, highlight=None, highlight_color='
 
     ### highlight if requested
     if highlight is not None:
-        rect = patches.Rectangle((highlight[0], 0), highlight[1] - highlight[0], ax.get_ylim()[1], facecolor=highlight_color, edgecolor='none', alpha=0.5)
+        rect = mpatches.Rectangle((highlight[0], 0), highlight[1] - highlight[0], ax.get_ylim()[1], facecolor=highlight_color, edgecolor='none', alpha=0.5)
         ax.add_patch(rect)
         
 

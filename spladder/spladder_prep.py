@@ -4,9 +4,11 @@ import numpy as np
 import pickle
 import h5py
 import re
+import pysam
 
 from . import settings
 from . import init
+from .init import append_chrms, parse_header
 from .reads import summarize_chr
 
 def prep_annotation(options):
