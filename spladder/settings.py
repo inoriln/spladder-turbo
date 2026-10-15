@@ -118,7 +118,7 @@ def parse_args(options, identity='main'):
     if hasattr(options, 'outdir') and not os.path.exists(options.outdir):
         print('WARNING: Output directory %s does not exist - will be created\n\n' % options.outdir, file=sys.stderr)
         try:
-            os.makedirs(options.outdir)
+            os.makedirs(options.outdir, exist_ok=True)
         except OSError:
             print('ERROR: Output directory %s can not be created.\n\n' % options.outdir, file=sys.stderr)
             sys.exit(2)

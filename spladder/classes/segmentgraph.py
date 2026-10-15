@@ -28,31 +28,31 @@ class Segmentgraph:
 
         sg = gene.splicegraph.vertices
         breakpoints = np.unique(sg.ravel())
-        self.segments = np.zeros((2, 0), dtype='int')
-        for j in range(1, breakpoints.shape[0]):
-            s = np.sum(sg[0, :] < breakpoints[j])
-            e = np.sum(sg[1, :] < breakpoints[j])
-            if s > e:
-                self.segments = np.c_[self.segments, [breakpoints[j-1], breakpoints[j]]]
+
+        ### a stretch between two breakpoints is a segment, if more exons started than ended before its end
+        n_started = np.searchsorted(np.sort(sg[0, :]), breakpoints[1:], side='left')
+        n_ended = np.searchsorted(np.sort(sg[1, :]), breakpoints[1:], side='left')
+        is_segment = n_started > n_ended
+        self.segments = np.vstack([breakpoints[:-1][is_segment], breakpoints[1:][is_segment]]).astype('int')
 
         ### match nodes to segments
-        self.seg_match = np.zeros((0, sg.shape[1]), dtype='bool')
-        for j in range(sg.shape[1]):
-            tmp = ((sg[0, j] <= self.segments[0, :]) & (sg[1, j] >= self.segments[1, :]))
-            if self.seg_match.shape[0] == 0:
-                self.seg_match = tmp.copy().reshape((1, tmp.shape[0]))
-            else:
-                self.seg_match = np.r_[self.seg_match, tmp.reshape((1, tmp.shape[0]))]
+        self.seg_match = ((sg[0, :][:, np.newaxis] <= self.segments[0, :][np.newaxis, :]) & (sg[1, :][:, np.newaxis] >= self.segments[1, :][np.newaxis, :]))
 
         ### create edge graph between segments
         self.seg_edges = np.zeros((self.segments.shape[1], self.segments.shape[1]), dtype='bool')
         k, l = np.where(np.triu(gene.splicegraph.edges))
 
-        for m in range(k.shape[0]):
-            ### donor segment
-            d = np.where(self.seg_match[k[m], :])[0][-1]
-            ### acceptor segment
-            a = np.where(self.seg_match[l[m], :])[0][0]
+        has_segment = self.seg_match.any(axis=1)
+        if k.shape[0] == 0:
+            pass
+        elif has_segment[k].all() and has_segment[l].all():
+            ### donor segment: last segment of the donor exon, acceptor segment: first segment of the acceptor exon
+            d = self.seg_match.shape[1] - 1 - np.argmax(self.seg_match[k, ::-1], axis=1)
+            a = np.argmax(self.seg_match[l, :], axis=1)
             self.seg_edges[d, a] = True
-
-
+        else:
+            ### an exon without any segment: the loop below raises the same error as before
+            for m in range(k.shape[0]):
+                d = np.where(self.seg_match[k[m], :])[0][-1]
+                a = np.where(self.seg_match[l[m], :])[0][0]
+                self.seg_edges[d, a] = True

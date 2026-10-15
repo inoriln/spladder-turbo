@@ -10,6 +10,7 @@ if __package__ is None:
     __package__ = 'modules'
 
 from .classes.region import Region
+from .utils import dump_pickle
 
 def get_tags_gff3(tagline):
     """Extract tags from given tagline"""
@@ -53,8 +54,8 @@ def init_genes_gtf(options):
         if line[0] == '#':
             continue
         sl = line.strip().split('\t')
-        tags = get_tags_gtf(sl[8])
         if sl[2].lower() in ['gene', 'pseudogene', 'unprocessed_pseudogene', 'transposable_element_gene']:
+            tags = get_tags_gtf(sl[8])
             try:
                 start = int(sl[3]) - 1
             except ValueError:
@@ -89,7 +90,11 @@ def init_genes_gtf(options):
         if line[0] == '#':
             continue
         sl = line.strip().split('\t')
-        
+
+        ### only use exon lines
+        if sl[2].lower() != 'exon':
+            continue
+
         ### get start and end
         try:
             start = int(sl[3]) - 1
@@ -102,10 +107,6 @@ def init_genes_gtf(options):
 
         ### get tags
         tags = get_tags_gtf(sl[8])
-
-        ### only use exon lines
-        if sl[2].lower() != 'exon':
-            continue
 
         try:
             trans_id = tags['transcript_id']
@@ -175,7 +176,7 @@ def init_genes_gtf(options):
     if options.verbose:
         print("Storing gene structure in %s.pickle ..." % options.annotation, file=sys.stderr)
 
-    pickle.dump(genes, open(options.annotation + '.pickle', 'wb'), -1)
+    dump_pickle(genes, options.annotation + '.pickle')
 
     if options.verbose:
         print("... done", file=sys.stderr)
@@ -301,7 +302,7 @@ def init_genes_gff3(options):
     if options.verbose:
         print("Storing gene structure in %s.pickle ..." % options.annotation, file=sys.stderr)
 
-    pickle.dump(genes, open(options.annotation + '.pickle', 'wb'), -1)
+    dump_pickle(genes, options.annotation + '.pickle')
 
     if options.verbose:
         print("... done", file=sys.stderr)

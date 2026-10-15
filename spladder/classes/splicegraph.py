@@ -57,67 +57,62 @@ class Splicegraph:
 
     def from_gene(self, gene):
         
+        ### the exons in the order they are found, the position of the last exon found with certain coordinates, the connected exons
+        vertices = []
+        position = dict()
+        connected = []
+
         for transcript_idx in range(len(gene.transcripts)):
-            exon_start_end = gene.exons[transcript_idx]
+            exon_start_end = gene.exons[transcript_idx].tolist()
             
             ### only one exon in the transcript
-            if exon_start_end.shape[0] == 1:
-                exon1_start = exon_start_end[0, 0]
-                exon1_end = exon_start_end[0, 1]
-
-                if self.vertices.shape[1] == 0:
-                    self.vertices = np.array([[exon1_start], [exon1_end]], dtype='int')
-                    self.edges = np.array([[0]], dtype='int')
-                else:
-                    self.vertices = np.c_[self.vertices, [exon1_start, exon1_end]]
-                    self.new_edge()
+            if len(exon_start_end) == 1:
+                exon = tuple(exon_start_end[0])
+                ### (the exon is also added, if it is there already)
+                position[exon] = len(vertices)
+                vertices.append(exon)
             ### more than one exon in the transcript
             else:
-                for exon_idx in range(exon_start_end.shape[0] - 1):
-                    exon1_start = exon_start_end[exon_idx , 0]
-                    exon1_end = exon_start_end[exon_idx, 1]
-                    exon2_start = exon_start_end[exon_idx + 1, 0]
-                    exon2_end = exon_start_end[exon_idx + 1, 1]
+                for exon_idx in range(len(exon_start_end) - 1):
+                    exon1 = tuple(exon_start_end[exon_idx])
+                    exon2 = tuple(exon_start_end[exon_idx + 1])
           
-                    if self.vertices.shape[1] == 0:
-                        self.vertices = np.array([[exon1_start, exon2_start], [exon1_end, exon2_end]], dtype='int')
-                        self.edges = np.array([[0, 1], [1, 0]], dtype='int')
+                    if len(vertices) == 0:
+                        vertices = [exon1, exon2]
+                        position[exon1] = 0
+                        position[exon2] = 1
+                        connected.append((0, 1))
                     else:
-                        exon1_idx = -1
-                        exon2_idx = -1
-                        ### check if current exon already occurred
-                        for idx in range(self.vertices.shape[1]):
-                            if ((self.vertices[0, idx] == exon1_start) and (self.vertices[1, idx] == exon1_end)):
-                                 exon1_idx = idx
-                            if ((self.vertices[0, idx] == exon2_start) and (self.vertices[1, idx] == exon2_end)):
-                                 exon2_idx = idx
+                        exon1_idx = position.get(exon1, -1)
+                        exon2_idx = position.get(exon2, -1)
 
                         ### both exons already occured -> only add an edge
                         if (exon1_idx != -1) and (exon2_idx != -1):
-                            self.edges[exon1_idx, exon2_idx] = 1
-                            self.edges[exon2_idx, exon1_idx] = 1
+                            connected.append((exon1_idx, exon2_idx))
+                        ### 2nd exon occured
+                        elif ((exon1_idx == -1) and (exon2_idx != -1)):
+                            position[exon1] = len(vertices)
+                            vertices.append(exon1)
+                            connected.append((exon2_idx, len(vertices) - 1))
+                        ### 1st exon occured
+                        elif ((exon2_idx == -1) and (exon1_idx != -1)):
+                            position[exon2] = len(vertices)
+                            vertices.append(exon2)
+                            connected.append((exon1_idx, len(vertices) - 1))
+                        ### no exon occured
                         else:
-                            ### 2nd exon occured
-                            if ((exon1_idx == -1) and (exon2_idx != -1)):
-                                self.vertices = np.c_[self.vertices, [exon1_start, exon1_end]]
-                                self.new_edge()
-                                self.edges[exon2_idx, -1] = 1
-                                self.edges[-1, exon2_idx] = 1
-                            ### 1st exon occured
-                            elif ((exon2_idx == -1) and (exon1_idx != -1)):
-                                self.vertices = np.c_[self.vertices, [exon2_start, exon2_end]]
-                                self.new_edge()
-                                self.edges[exon1_idx, -1] = 1
-                                self.edges[-1, exon1_idx] = 1
-                            ### no exon occured
-                            else:
-                                assert((exon1_idx == -1) and (exon2_idx == -1))
-                                self.vertices = np.c_[self.vertices, [exon1_start, exon1_end]]
-                                self.vertices = np.c_[self.vertices, [exon2_start, exon2_end]]
-                                self.new_edge()
-                                self.new_edge()
-                                self.edges[-2, -1] = 1
-                                self.edges[-1, -2] = 1
+                            position[exon1] = len(vertices)
+                            vertices.append(exon1)
+                            position[exon2] = len(vertices)
+                            vertices.append(exon2)
+                            connected.append((len(vertices) - 2, len(vertices) - 1))
+
+        if len(vertices) > 0:
+            self.vertices = np.array([[v[0] for v in vertices], [v[1] for v in vertices]], dtype='int')
+            self.edges = np.zeros((len(vertices), len(vertices)), dtype='int')
+            for (a, b) in connected:
+                self.edges[a, b] = 1
+                self.edges[b, a] = 1
 
         ### take care of the sorting by exon start
         s_idx = np.argsort(self.vertices[0, :])
@@ -271,20 +266,25 @@ class Splicegraph:
     def uniquify(self):
         # OUTPUT: splice graph that has been made unique on exons for each gene
 
+        ### sorting by (start, stop) puts identical exons next to each other (sorting the sorted exons once
+        ### more, as it was done before, leaves the order unchanged)
         self.sort()
-        (s_tmp, s_idx) = sort_rows(self.vertices.T, index=True)
-        self.vertices = s_tmp.T
-        self.edges = self.edges[s_idx, :][:, s_idx]
-        self.terminals = self.terminals[:, s_idx]
+
+        ### vertices do not change in the loop below: find all identical neighbours at once
+        same = np.all(self.vertices[:, 1:] == self.vertices[:, :-1], axis=0)
+        duplicates = np.flatnonzero(same) + 1
+        if duplicates.shape[0] == 0:
+            return
 
         rm_idx = []
-        for j in range(1, self.vertices.shape[1]):
-            if np.all(self.vertices[:, j-1] == self.vertices[:, j]):
-                self.edges[:, j] = self.edges[:, j-1] | self.edges[:, j]
-                self.edges[j, :] = self.edges[j-1, :] | self.edges[j, :]
-                rm_idx.append(j - 1)
+        for j in duplicates:
+            self.edges[:, j] = self.edges[:, j-1] | self.edges[:, j]
+            self.edges[j, :] = self.edges[j-1, :] | self.edges[j, :]
+            rm_idx.append(j - 1)
 
-        keep_idx = np.where(~np.isin(np.array(np.arange(self.vertices.shape[1])), rm_idx))[0]
+        keep = np.ones((self.vertices.shape[1],), dtype='bool')
+        keep[rm_idx] = False
+        keep_idx = np.where(keep)[0]
         self.vertices = self.vertices[:, keep_idx]
         self.edges = self.edges[keep_idx, :][:, keep_idx]
         self.terminals = self.terminals[:, keep_idx]

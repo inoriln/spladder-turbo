@@ -268,6 +268,91 @@ def filter_by_edgecount(genes, options):
     return genes[keep_genes]
 
 
+@jit_cached
+def _span_median(row, lo, hi):
+    """np.median(row[lo:hi]) for a non-empty span, as np.median computes it."""
+
+    values = np.sort(row[lo:hi])
+    n = hi - lo
+    if n % 2 == 1:
+        return values[n // 2]
+    return (values[n // 2 - 1] + values[n // 2]) / 2.0
+
+
+@jit_cached
+def _retentions_of_gene(row, gene_start, vertices, edges, min_cov, min_region, max_fold, min_rel_cov, max_rel_cov, new_retention):
+    """Which introns of the splice graph (edges) of a gene are retained: the coverage tests of insert_intron_retentions, step by step.
+
+    row is the coverage of the gene (starting at gene_start); the retained introns are marked in new_retention.  The coverage values are
+    integers, so sums and means are exact however they are summed up.  Returns (status, introns tested, introns found); status 1: a span lies
+    outside of the coverage (the caller does it the general way)."""
+
+    n_exons = vertices.shape[1]
+    n_row = row.shape[0]
+    exon_coverage = np.zeros(n_exons)
+    for k in range(n_exons):
+        lo = vertices[0, k] - gene_start
+        hi = vertices[1, k] - gene_start
+        if hi > lo:
+            if lo < 0 or hi > n_row:
+                return (1, 0, 0)
+            exon_coverage[k] = _span_median(row, lo, hi)
+        else:
+            exon_coverage[k] = np.nan
+
+    tested = 0
+    found = 0
+    for k in range(n_exons):
+        for l in range(k, n_exons):
+            if edges[k, l] == 0:
+                continue
+            ### ignore introns that include at least one complete exon
+            includes_exon = False
+            for m in range(n_exons):
+                if vertices[0, m] > vertices[1, k] and vertices[1, m] < vertices[0, l]:
+                    includes_exon = True
+                    break
+            if includes_exon:
+                continue
+
+            tested += 1
+            lo = vertices[1, k] - gene_start
+            hi = vertices[0, l] - gene_start
+            if hi <= lo:
+                ### nothing to compare: the median of nothing is not a number
+                continue
+            if lo < 0 or hi > n_row:
+                return (1, 0, 0)
+            n = hi - lo
+            total = 0.0
+            for i in range(lo, hi):
+                total += row[i]
+            mean = total / n
+            if not _span_median(row, lo, hi) > min_cov:
+                continue
+            count = 0
+            threshold = 0.5 * mean
+            for i in range(lo, hi):
+                if row[i] > threshold:
+                    count += 1
+            if not count / n > min_region:
+                continue
+            ### Python's max and min of two numbers
+            a = exon_coverage[k]
+            b = exon_coverage[l]
+            larger = b if b > a else a
+            smaller = b if b < a else a
+            if not larger / (1e-6 + smaller) <= max_fold:
+                continue
+            if not mean >= min_rel_cov * (a + b) / 2.0:
+                continue
+            if not mean <= max_rel_cov * (a + b) / 2.0:
+                continue
+            new_retention[k, l] = 1
+            found += 1
+    return (0, tested, found)
+
+
 def insert_intron_retentions(genes, bam_fnames, options):
     # written by Georg Zeller & Gunnar Raetsch, Mpi Tuebingen, Germany, 2009, Andre Kahles, MSKCC, 2013
 
@@ -317,17 +402,31 @@ def insert_intron_retentions(genes, bam_fnames, options):
                 else:
                     tracks = add_reads_from_bam(np.array([gg], dtype='object'), bam_fnames, ['exon_track'], options.read_filter, options.var_aware, options.primary_only, options.ignore_mismatches, mm_tag=options.mm_tag, cram_ref=options.ref_genome)
 
+                ### check for all vertex-pairs, if respective intron can be retained
+                new_retention = np.zeros(gg.splicegraph.edges.shape, dtype='int') 
+                compiled = False
+                if (not options.sparse_bam and type(tracks) is np.ndarray and tracks.dtype == np.float64 and tracks.ndim == 2 and tracks.shape[0] == 1 and
+                        gg.splicegraph.vertices.dtype == np.int64 and gg.splicegraph.vertices.shape[0] == 2 and gg.splicegraph.edges.dtype in (np.int64, np.bool_) and
+                        gg.splicegraph.edges.shape == (gg.splicegraph.vertices.shape[1], gg.splicegraph.vertices.shape[1]) and isinstance(gg.start, (int, np.integer))):
+                    (status, tested, found) = _retentions_of_gene(tracks[0], int(gg.start), gg.splicegraph.vertices, gg.splicegraph.edges, options.intron_retention['min_retention_cov'],
+                                                                  options.intron_retention['min_retention_region'], options.intron_retention['min_retention_max_exon_fold_diff'],
+                                                                  options.intron_retention['min_retention_rel_cov'], options.intron_retention['max_retention_rel_cov'], new_retention)
+                    if status == 0:
+                        compiled = True
+                        num_introns += tested
+                        inserted += found
+                    else:
+                        new_retention[:] = 0
+
                 exon_coverage = np.zeros((gg.splicegraph.vertices.shape[1],), dtype='float')
-                for k in range(gg.splicegraph.vertices.shape[1]):
+                for k in ([] if compiled else range(gg.splicegraph.vertices.shape[1])):
                     idx = np.arange(gg.splicegraph.vertices[0, k], gg.splicegraph.vertices[1, k]) - gg.start
                     exon_coverage[k] = np.median(np.sum(tracks[:, idx], axis=0).astype('float')) # median coverage for exon k
 
-                ### check for all vertex-pairs, if respective intron can be retained
-                new_retention = np.zeros(gg.splicegraph.edges.shape, dtype='int') 
                 #for k in range(gg.splicegraph.edges.shape[0]):
                 #    for l in range(k + 1, gg.splicegraph.edges.shape[0]):
                 #        if gg.splicegraph.edges[k, l] == 1:
-                for k,l in np.array(np.where(np.triu(gg.splicegraph.edges))).T:
+                for k,l in ([] if compiled else np.array(np.where(np.triu(gg.splicegraph.edges))).T):
                     ### ignore introns that include at least one complete exon
                     if np.sum((gg.splicegraph.vertices[0, :] > gg.splicegraph.vertices[1, k]) & (gg.splicegraph.vertices[1, :] < gg.splicegraph.vertices[0, l])) > 0:
                         continue
@@ -825,6 +924,46 @@ def insert_intron_edges(genes, bam_fnames, options):
     return (genes, inserted)
 
 
+
+def _all_introns(introns, vertices, edges):
+    """Introns of a gene (columns start, stop) joined with the introns implied by the splice graph, made unique."""
+
+    all_introns = introns[:, :2]
+    ### introns are half open; the edges are visited row by row, as the former loops did
+    k_idx, l_idx = np.nonzero(np.triu(edges == 1, 1))
+    if k_idx.shape[0] > 0:
+        all_introns = np.r_[all_introns, np.c_[vertices[1, k_idx], vertices[0, l_idx]]]
+    return unique_rows(all_introns)
+
+
+def _cassette_candidate_pairs(all_introns, vertices):
+    """Pairs (k, l), k < l, of introns between which a new exon can be inserted.
+
+    The exon would lie between the end of intron k and the start of intron l; the outer ends of the two introns
+    have to be supported by existing exons, and the new exon must not overlap an existing exon."""
+
+    n = all_introns.shape[0]
+    if n < 2:
+        return np.zeros((0, 2), dtype='int')
+
+    intron_start = all_introns[:, 0]
+    intron_stop = all_introns[:, 1]
+    start_supported = np.isin(intron_start, vertices[1, :])
+    stop_supported = np.isin(intron_stop, vertices[0, :])
+
+    ### an exon [intron_stop[k], intron_start[l]) overlaps an existing exon e, if e starts before intron_start[l]
+    ### and ends after intron_stop[k]: look at the largest end of all exons starting before intron_start[l]
+    order = np.argsort(vertices[0, :], kind='stable')
+    max_end = np.maximum.accumulate(vertices[1, order]) if order.shape[0] > 0 else np.zeros((0,), dtype='int')
+    n_before = np.searchsorted(vertices[0, order], intron_start, side='left')
+    overlap = np.zeros((n, n), dtype='bool')
+    has_before = n_before > 0
+    overlap[:, has_before] = max_end[n_before[has_before] - 1][np.newaxis, :] > intron_stop[:, np.newaxis]
+
+    candidates = (intron_stop[:, np.newaxis] < intron_start[np.newaxis, :]) & start_supported[:, np.newaxis] & stop_supported[np.newaxis, :] & ~overlap
+    return np.argwhere(np.triu(candidates, 1))
+
+
 def insert_cassette_exons(genes, bam_fnames, options):
     # written by Andre Kahles, Mpi Tuebingen, Germany, 2012
 
@@ -875,12 +1014,7 @@ def insert_cassette_exons(genes, bam_fnames, options):
                     tracks = add_reads_from_bam(np.array([gg], dtype='object'), bam_fnames, ['exon_track'], options.read_filter, options.var_aware, options.primary_only, options.ignore_mismatches, mm_tag=options.mm_tag, cram_ref=options.ref_genome)
 
                 ### add introns implied by splicegraph to the list
-                all_introns = gg.introns[si][:, :2]
-                for k in range(gg.splicegraph.edges.shape[0]):
-                    for l in range(k+1, gg.splicegraph.edges.shape[0]):
-                        if gg.splicegraph.edges[k, l] == 1:
-                            all_introns = np.r_[all_introns, np.array([[gg.splicegraph.vertices[1, k], gg.splicegraph.vertices[0, l]]])] # introns are half open
-                all_introns = unique_rows(all_introns)
+                all_introns = _all_introns(gg.introns[si], gg.splicegraph.vertices, gg.splicegraph.edges)
            
                 ### use only relevant introns (inside gene boundaries)
                 if all_introns.shape[0] > 0:
@@ -892,48 +1026,38 @@ def insert_cassette_exons(genes, bam_fnames, options):
 
                 ### check for all intron-pairs, if exon could exist between them
                 new_cassette = np.zeros((all_introns.shape[0], all_introns.shape[0]), dtype='int') 
-                for k in range(all_introns.shape[0]):
-                    for l in range(k + 1, all_introns.shape[0]):
-                        if all_introns[k, 1] >= all_introns[l, 0]:
-                            continue
-                        ### only take intron pair, if outer ends are supported by current exons
-                        if (not all_introns[k, 0] in gg.splicegraph.vertices[1, :]) or (not all_introns[l, 1] in gg.splicegraph.vertices[0, :]): 
-                            continue
-                        curr_exon = [all_introns[k, 1], all_introns[l, 0]]
-                        ### do not allow curr_exon to overlap existing exon
-                        if np.sum((gg.splicegraph.vertices[0, :] < curr_exon[1]) & (gg.splicegraph.vertices[1, :] > curr_exon[0])) > 0:
-                            continue
+                for k, l in _cassette_candidate_pairs(all_introns, gg.splicegraph.vertices):
+                    curr_exon = [all_introns[k, 1], all_introns[l, 0]]
+                    num_exons += 1
 
-                        num_exons += 1
+                    if not ismember(curr_exon, gg.splicegraph.vertices.T, rows=True):
+                        idx = np.arange(curr_exon[0], curr_exon[1]) - gg.start
+                        exon_cov = np.sum(tracks[:, idx], axis=0)
 
-                        if not ismember(curr_exon, gg.splicegraph.vertices.T, rows=True):
-                            idx = np.arange(curr_exon[0], curr_exon[1]) - gg.start
-                            exon_cov = np.sum(tracks[:, idx], axis=0)
+                        pre_segment_end = np.where(segment_ends < curr_exon[0])[0]
+                        if pre_segment_end.shape[0] > 0:
+                            pre_segment_cov = np.sum(tracks[:, np.arange(segment_ends[pre_segment_end.max()], curr_exon[0]) - gg.start], axis=0)
+                        else:
+                            pre_segment_cov = np.sum(tracks[:, np.arange(curr_exon[0] - gg.start)], axis=0)
+                        min_len_pre = min(pre_segment_cov.shape[0], exon_cov.shape[0])
 
-                            pre_segment_end = np.where(segment_ends < curr_exon[0])[0]
-                            if pre_segment_end.shape[0] > 0:
-                                pre_segment_cov = np.sum(tracks[:, np.arange(segment_ends[pre_segment_end.max()], curr_exon[0]) - gg.start], axis=0)
-                            else:
-                                pre_segment_cov = np.sum(tracks[:, np.arange(curr_exon[0] - gg.start)], axis=0)
-                            min_len_pre = min(pre_segment_cov.shape[0], exon_cov.shape[0])
+                        aft_segment_start = np.where(segment_starts > curr_exon[1])[0]
+                        if aft_segment_start.shape[0] > 0:
+                            aft_segment_cov = np.sum(tracks[:, np.arange(curr_exon[1], segment_starts[aft_segment_start.min()]) - gg.start], axis=0)
+                        else:
+                            aft_segment_cov = np.sum(tracks[:, (curr_exon[1] - gg.start):], axis=0)
+                        min_len_aft = min(aft_segment_cov.shape[0], exon_cov.shape[0])
 
-                            aft_segment_start = np.where(segment_starts > curr_exon[1])[0]
-                            if aft_segment_start.shape[0] > 0:
-                                aft_segment_cov = np.sum(tracks[:, np.arange(curr_exon[1], segment_starts[aft_segment_start.min()]) - gg.start], axis=0)
-                            else:
-                                aft_segment_cov = np.sum(tracks[:, (curr_exon[1] - gg.start):], axis=0)
-                            min_len_aft = min(aft_segment_cov.shape[0], exon_cov.shape[0])
-
-                            if np.mean(exon_cov > (0.2 * np.mean(exon_cov))) > options.cassette_exon['min_cassette_region'] and \
-                               np.median(exon_cov) > options.cassette_exon['min_cassette_cov']:
-                                median_aft = max(np.median(aft_segment_cov[:min_len_aft]), 1)
-                                median_pre = max(np.median(pre_segment_cov[-min_len_pre:]), 1)
-                                if (np.median(exon_cov[-min_len_aft:]) / median_aft) - 1 >= options.cassette_exon['min_cassette_rel_diff'] and \
-                                   (np.median(exon_cov[:min_len_pre]) / median_pre) - 1 >= options.cassette_exon['min_cassette_rel_diff']:
-                                    new_cassette[k, l] = 1
-                                    inserted += 1 
+                        if np.mean(exon_cov > (0.2 * np.mean(exon_cov))) > options.cassette_exon['min_cassette_region'] and \
+                           np.median(exon_cov) > options.cassette_exon['min_cassette_cov']:
+                            median_aft = max(np.median(aft_segment_cov[:min_len_aft]), 1)
+                            median_pre = max(np.median(pre_segment_cov[-min_len_pre:]), 1)
+                            if (np.median(exon_cov[-min_len_aft:]) / median_aft) - 1 >= options.cassette_exon['min_cassette_rel_diff'] and \
+                               (np.median(exon_cov[:min_len_pre]) / median_pre) - 1 >= options.cassette_exon['min_cassette_rel_diff']:
+                                new_cassette[k, l] = 1
+                                inserted += 1 
                 any_added = False
-                if any(new_cassette.ravel()):
+                if new_cassette.any():
                     curr_sg = gg.splicegraph.vertices
                     for k in range(new_cassette.shape[1]):
                         for l in range(k + 1, new_cassette.shape[1]):
