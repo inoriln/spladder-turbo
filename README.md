@@ -17,25 +17,29 @@ The whole workflow of `spladder build` (graph augmentation, merging, quantificat
 
 | | SplAdder 3.1.1 | spladder-turbo 0.1.0 | |
 |---|---|---|---|
-| Wall-clock time | 3 h 04 min | 4 min 28 s and 4 min 33 s in two runs (`--parallel 8`) | 40-41 x |
-| CPU time | 15,650 s | 1,425 s and 1,605 s | 10-11 x |
-| Memory of the largest process | 2.9 GB | 3.0 GB | |
+| Wall-clock time, both with `--parallel 8` | 4 h 12 min 45 s | 4 min 28.5 s and 4 min 33.1 s in two runs | 55.5-56.5 x |
+| CPU time | 16,354 s | 1,425 s and 1,605 s | 10.2-11.5 x |
 
-The same workflow on chr20 only, three samples (SRR29779619 to SRR29779621):
+The whole-genome `--parallel 8` baseline and its successful output comparison come from a historical Claude shell transcript supplied by the maintainer. The original temporary files are no longer accessible in the current environment; this is not a new whole-genome measurement. See [the benchmark record](docs/BENCHMARK_PARALLEL8.md) for the evidence and its limits.
+
+The same workflow on chr20 only, three samples (SRR29779619 to SRR29779621). The historical and new measurements used different servers, identified below:
 
 | | SplAdder 3.1.1 | spladder-turbo 0.1.0 | |
 |---|---|---|---|
-| One process | 5 min 04 s | 40 s | 7.5 x |
-| `--parallel 8` | (not measured) | 23 s | 13 x, compared with one process of SplAdder |
+| EPYC 7601, one process (historical) | 5 min 04 s | 40 s | 7.5 x |
+| EPYC 7601, turbo `--parallel 8` (historical) | 5 min 04 s (one process) | 23 s | 13 x, compared with one process of SplAdder |
+| EPYC 7C13, both `--parallel 8` (2026-10-15) | 253.8 s | 39.3 s | 6.5 x |
+
+The new chr20 measurement runs each version once, from the GTF, without an extra warm-up or forced clearing of compiled caches. Both exit successfully; all 39 output files have identical content, and the converted annotation objects are equal. This compares file contents, datasets and objects, not necessarily raw file bytes. Commands, exact timings and limitations are in [the benchmark record](docs/BENCHMARK_PARALLEL8.md#chr20-2026-10-15-复测).
 
 How to read these numbers:
 
-- Measured on one Linux server with two AMD EPYC 7601 processors (128 threads) and 314 GB of memory, with Python 3.13, numpy 2.3, numba 0.62 and pysam 0.23. Times are from `/usr/bin/time -v`.
-- SplAdder was run in the way that is most favourable to it: with single-threaded linear algebra libraries, and for the whole genome with the two per-sample graph steps started as two simultaneous processes. SplAdder's own `--parallel` only distributes the detection and verification of events. We have **not yet measured** SplAdder with `--parallel 8` on the whole genome.
+- Historical measurements used a Linux server with two AMD EPYC 7601 processors (128 threads) and 314 GB of memory, with Python 3.13, numpy 2.3, numba 0.62 and pysam 0.23, timed with `/usr/bin/time -v`. The new chr20 measurement used an EPYC 7C13 server (256 logical CPUs), Python 3.13.9, numpy 2.3.4, numba 0.62.1 and pysam 0.23.3, timed with `validation/benchmark.py`. Do not compare timings across these servers as a speed-up measurement.
+- The whole-genome baseline runs SplAdder in one command with `--parallel 8`. An earlier baseline manually ran the two per-sample graph steps simultaneously: 3 h 04 min 15 s, or 40.5-41.2 x slower than turbo. Both baselines limit the linear algebra libraries to one thread. SplAdder's own `--parallel` only distributes the detection and verification of events.
 - The speed-up of one process (7.5 x) comes from reading each contig of an alignment file once with a compiled reader, from compiled kernels and from vectorized code. The rest comes from running samples, contigs and event types in parallel processes (Linux only). The CPU time shows how much less work is done in total.
 - The first run compiles numba functions, which takes about half a minute (68 s instead of 40 s for the chr20 run above). The compiled code is cached on disk.
 - With `--parallel 8` the whole-genome run uses about 9 GB in total, in up to about 24 processes at the same time.
-- The scripts and the raw logs of these measurements are not yet part of this repository (see [docs/PERFORMANCE_CHANGES.md](docs/PERFORMANCE_CHANGES.md) for the method and the single measurements).
+- Reusable timing and comparison scripts are in [validation/](validation/). Historical raw logs are not included; the available transcript evidence is recorded in [docs/BENCHMARK_PARALLEL8.md](docs/BENCHMARK_PARALLEL8.md).
 
 ## What was optimized, where, and why
 
@@ -53,7 +57,7 @@ Sampling profile (py-spy) of SplAdder 3.1.1 on a chr20 subset of human data, and
 
 ### Where the time goes now
 
-Whole genome, two samples, from the GTF file (as in the table above). The times of spladder-turbo are taken from the time stamps of one run (4 min 33 s). Tasks of a parallel stage print their output when they finish, so the boundaries are accurate to a few seconds.
+Whole genome, two samples, from the GTF file. This stage breakdown uses the earlier SplAdder baseline with manually parallelized graph augmentation (3 h 04 min), rather than the one-command `--parallel 8` baseline above. The times of spladder-turbo are taken from the time stamps of one run (4 min 33 s). Tasks of a parallel stage print their output when they finish, so the boundaries are accurate to a few seconds.
 
 | Step | SplAdder 3.1.1 | spladder-turbo (`--parallel 8`) |
 |---|---|---|
