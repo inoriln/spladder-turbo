@@ -5,46 +5,48 @@
 
 from setuptools import setup, find_packages
 
-with open('README.md') as readme_file:
+with open('README.md', encoding='utf-8') as readme_file:
     readme = readme_file.read()
-
-setup_requirements = ['pytest-runner']
 
 with open('requirements.txt') as f:
     requirements = list(f.readlines())
 
-test_requirements = ['pytest']
-
 setup(
-    author="Andre Kahles",
-    author_email='andre.kahles@inf.ethz.ch',
+    author="Yihao Zhang",
     classifiers=[
-        'Development Status :: 2 - Pre-Alpha',
-        'Intended Audience :: Developers',
-        'License :: OSI Approved :: BSD License',
+        'Development Status :: 3 - Alpha',
+        'Intended Audience :: Science/Research',
         'Natural Language :: English',
-        "Programming Language :: Python :: 3",
-        'Programming Language :: Python :: 3.8'
+        'Operating System :: POSIX :: Linux',
+        'Programming Language :: Python :: 3',
+        'Programming Language :: Python :: 3 :: Only',
+        'Topic :: Scientific/Engineering :: Bio-Informatics',
     ],
-    description="Tool for the detection and quantification of alternative splicing events from RNA-Seq data.",
+    description="Unofficial, performance-optimized fork of SplAdder: detection and quantification of alternative splicing events from RNA-Seq data.",
     entry_points = {
         'console_scripts': [
             'spladder=spladder.spladder:main',
+            'spladder-turbo=spladder.spladder:main',
         ],
 
     },
     install_requires=requirements,
-    license="BSD license",
+    license="BSD-3-Clause",
+    license_files=['LICENSE', 'COPYRIGHT', 'AUTHORS', 'ATTRIBUTION.md'],
     long_description=readme,
     long_description_content_type='text/markdown',
     include_package_data=True,
-    keywords='spladder',
-    name='spladder',
-    packages=find_packages(),
-    setup_requires=setup_requirements,
-    test_suite='tests',
-    tests_require=test_requirements,
-    url='https://github.com/ratschlab/spladder',
-    version='3.1.1',
+    keywords='spladder alternative-splicing rna-seq splicing-graph',
+    name='spladder-turbo',
+    packages=find_packages(exclude=['tests', 'tests.*']),
+    project_urls={
+        'Source': 'https://github.com/inoriln/spladder-turbo',
+        'Issues': 'https://github.com/inoriln/spladder-turbo/issues',
+        'Upstream (SplAdder)': 'https://github.com/ratschlab/spladder',
+        'SplAdder documentation': 'https://spladder.readthedocs.io',
+    },
+    python_requires='>=3.9',
+    url='https://github.com/inoriln/spladder-turbo',
+    version='0.1.0',
     zip_safe=False,
 )

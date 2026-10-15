@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 
-"""Top-level package for spladder."""
+"""Top-level package for spladder-turbo, a fork of SplAdder."""
 
 __author__ = """Andre Kahles"""
-__email__ = 'andre.kahles@inf.ethz.ch'
-__version__ = '3.1.1'
+__version__ = '0.1.0'
+### the version of SplAdder that this version is based on
+__upstream_version__ = '3.1.1'
