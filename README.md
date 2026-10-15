@@ -1,3 +1,8 @@
+> **spladder-turbo** is an unofficial, performance-optimized fork of [SplAdder](https://github.com/ratschlab/spladder) 3.1.1.
+> Its outputs are intended to be identical to those of SplAdder; the evidence and the known differences are described in
+> [docs/PERFORMANCE_CHANGES.md](docs/PERFORMANCE_CHANGES.md). See [ATTRIBUTION.md](ATTRIBUTION.md) for credits and licensing.
+> It is not affiliated with or endorsed by the SplAdder authors.
+
 What is SplAdder?
 -----------------
 
