@@ -9,6 +9,9 @@
 # Copyright (C) 2009-2011 Max Planck Society
 # Copyright (C) 2012-2016 Memorial Sloan-Kettering Cancer Center
 # Copyright (C) 2016-2021 ETH Zurich
+#
+# Modified 2026 by Yihao Zhang for spladder-turbo (see ATTRIBUTION.md and docs/PERFORMANCE_CHANGES.md).
+# The notices above are retained.
 
 import copy
 import sys

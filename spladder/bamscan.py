@@ -1,3 +1,5 @@
+# Copyright (c) 2026, Yihao Zhang. Part of spladder-turbo, a fork of SplAdder (see ATTRIBUTION.md).
+# SPDX-License-Identifier: BSD-3-Clause
 """Reading the alignments of one contig of an indexed BAM file without creating an object per alignment.
 
 evidence.build_contig_evidence needs a few facts about every alignment of a contig: where its aligned blocks and

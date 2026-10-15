@@ -1,3 +1,5 @@
+# Copyright (c) 2026, Yihao Zhang. Part of spladder-turbo, a fork of SplAdder (see ATTRIBUTION.md).
+# SPDX-License-Identifier: BSD-3-Clause
 """Single-pass read evidence for coverage and intron queries.
 
 SplAdder asks for the read coverage and the spliced alignments of one gene after the other and does so in

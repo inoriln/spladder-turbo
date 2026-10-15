@@ -1,3 +1,5 @@
+# Copyright (c) 2026, Yihao Zhang. Part of spladder-turbo, a fork of SplAdder (see ATTRIBUTION.md).
+# SPDX-License-Identifier: BSD-3-Clause
 """Processing of samples in parallel processes.
 
 The graphs of the individual samples (and the counting of the graph on the individual samples) do not depend

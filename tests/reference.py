@@ -1,3 +1,5 @@
+# The functions in this file are copies of SplAdder 3.1.1 (upstream commit 65ceec8), Copyright (c) 2008-2019 Cheng Soon Ong,
+# Gunnar Raetsch, Andre Kahles and others (see COPYRIGHT), BSD 3-Clause; the tests use them as the reference.
 """Verbatim copies of the original implementations of functions that were optimized.
 
 They are the specification the optimized versions are tested against (see test_*.py) and are not used by SplAdder itself.
