@@ -1,11 +1,15 @@
 # spladder-turbo
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 **An unofficial, performance-optimized fork of [SplAdder](https://github.com/ratschlab/spladder) 3.1.1** for the detection and quantification of alternative splicing events from RNA-Seq alignments.
 
 spladder-turbo is meant as a drop-in replacement: the same command line, the same output files and, as far as we have been able to test, the same results, in a fraction of the time. Like SplAdder it builds the splicing graph of an annotation, augments it with the evidence of the alignments, extracts alternative splicing events from the graph (exon skips, multiple exon skips, intron retentions, alternative 3' and 5' splice sites, mutually exclusive exons) and quantifies them.
 
-> **Status: development version 0.1.0, not yet released on PyPI.**
+> **Status: development version 0.1.0, installable from GitHub, not yet released on PyPI.**
 > spladder-turbo is **not affiliated with or endorsed by** the SplAdder authors or their institutions. The method, the definitions of the events and the file formats are theirs. If you use this software, please cite the SplAdder paper (see [Citation](#citation)).
+
+**Contents:** [Performance](#performance) · [What was optimized, where, and why](#what-was-optimized-where-and-why) · [Are the results the same?](#are-the-results-the-same) · [Installation](#installation) · [Usage](#usage) · [Tests](#tests) · [Documentation](#documentation) · [Citation](#citation) · [License and attribution](#license-and-attribution)
 
 ## Performance
 
@@ -13,8 +17,8 @@ The whole workflow of `spladder build` (graph augmentation, merging, quantificat
 
 | | SplAdder 3.1.1 | spladder-turbo 0.1.0 | |
 |---|---|---|---|
-| Wall-clock time | 3 h 04 min | 4 min 28 s (`--parallel 8`) | 41 x |
-| CPU time | 15,650 s | 1,425 s | 11 x |
+| Wall-clock time | 3 h 04 min | 4 min 28 s and 4 min 33 s in two runs (`--parallel 8`) | 40-41 x |
+| CPU time | 15,650 s | 1,425 s and 1,605 s | 10-11 x |
 | Memory of the largest process | 2.9 GB | 3.0 GB | |
 
 The same workflow on chr20 only, three samples (SRR29779619 to SRR29779621):
@@ -32,6 +36,90 @@ How to read these numbers:
 - The first run compiles numba functions, which takes about half a minute (68 s instead of 40 s for the chr20 run above). The compiled code is cached on disk.
 - With `--parallel 8` the whole-genome run uses about 9 GB in total, in up to about 24 processes at the same time.
 - The scripts and the raw logs of these measurements are not yet part of this repository (see [docs/PERFORMANCE_CHANGES.md](docs/PERFORMANCE_CHANGES.md) for the method and the single measurements).
+
+## What was optimized, where, and why
+
+spladder-turbo changes *how* SplAdder computes, not *what* it computes. This section lists the optimizations: where in the code, which problem of SplAdder 3.1.1 each one addresses, what is done instead, and what it brought. The complete record, with every changed function, is in [docs/PERFORMANCE_CHANGES.md](docs/PERFORMANCE_CHANGES.md).
+
+### Where the time went in SplAdder 3.1.1
+
+Sampling profile (py-spy) of SplAdder 3.1.1 on a chr20 subset of human data, and a look at the code, showed five things:
+
+1. **Reading the alignments took about 70% of the run time.** For every gene and in each of five processing steps (introns of the sample, cassette exons, intron retentions, new intron edges, counting), SplAdder fetches the alignments of the gene window with `pysam.fetch` and filters them one by one in a Python loop. An alignment that overlaps a gene is decoded once per step, which reads the data about 5 times.
+2. **Almost everything was serial.** `--parallel` only distributed the detection and verification of events. Graphs, merging and counting ran one sample after the other in one process.
+3. **Many tiny Python and numpy calls per gene.** Labelling the genes, testing intron retentions, building segment graphs, removing duplicate exons and counting each do dozens of small numpy calls per gene, for 60,000 genes.
+4. **Repeated work.** The same 217 MB graph file was loaded about 12 times in a run; `compute_gene_expression` re-read the whole table of gene names inside the loop over the genes; numba functions were compiled again by every process (about 17 s); linear algebra libraries ran hidden threads on small matrices.
+5. **Sending data to worker processes.** The pools for the detection and verification of events pickled gene objects for every task. The main process spent 20 s on serialization alone.
+
+### Where the time goes now
+
+Whole genome, two samples, from the GTF file (as in the table above). The times of spladder-turbo are taken from the time stamps of one run (4 min 33 s). Tasks of a parallel stage print their output when they finish, so the boundaries are accurate to a few seconds.
+
+| Step | SplAdder 3.1.1 | spladder-turbo (`--parallel 8`) |
+|---|---|---|
+| Parsing the annotation (once per annotation) | 2 min 05 s | 42 s |
+| Graph augmentation of the two samples | 1 h 34 min (two processes) | 1 min 53 s |
+| Merging, counting, gene expression, events | 1 h 28 min | 1 min 58 s: merging 43 s, counting 47 s, gene expression 13 s, verification and writing 15 s (the events are detected during the counting) |
+| **Total** | **3 h 04 min** | **4 min 33 s** |
+
+### The optimizations
+
+Paths are relative to `spladder/`. "New" marks files that do not exist in SplAdder.
+
+**A. Reading the alignments**
+
+| Where | Problem in SplAdder 3.1.1 | What spladder-turbo does | Effect |
+|---|---|---|---|
+| `evidence.py` (new), `reads.py` (`add_reads_from_bam`) | Every gene and every step fetches its window again and decodes the alignments in Python (about 5 times per alignment). | One sequential pass over each contig builds a compact form: the coverage as a step function per read class (by XS tag) and sorted arrays of the introns with their read counts. Every window request is then answered from memory by binary search, with the same values, dtypes and shapes. The memory is limited (`SPLADDER_EVIDENCE_MAX_GB`, LRU). | Removes the read amplification of the dominant cost. |
+| `bamscan.py` (new) | Even one pass with pysam costs a Python object and several attribute lookups per alignment, about 4 times the time it takes to decompress the file. | A compiled (numba) reader for indexed BAM files: it finds the contig with the BAI index, inflates the BGZF blocks (CRC32 and sizes are checked) and decodes the records with the same filters in the same order. It gives up, and pysam is used, for CRAM, other indices, unusual tags, records that htslib refuses or expands, and damaged files. | chr1 of a human sample (about 4 million aligned blocks): 11.9 s to 3.2 s. All contigs of two samples: 3.0 times less CPU time than the pysam loop. |
+| `reads.py` (`_get_alignment_file`, `_get_reads_collapsed`) | The per-window reading that remains (several BAM files, `--var-aware`) opened the BAM file, with header and index, for every gene, and converted all tags of every alignment. | Open files are cached per process (LRU); the CIGAR is decoded once; only the needed tags are read; the coverage is accumulated in a difference array. | Faster fallback path. |
+
+**B. Annotation and splicing graphs**
+
+| Where | Problem in SplAdder 3.1.1 | What spladder-turbo does | Effect |
+|---|---|---|---|
+| `init.py` (`init_genes_gtf`), `classes/splicegraph.py` (`from_gene`) | All attributes of all 2.9 million GTF lines were parsed, and the graph of a gene was built with a loop over all vertices for every pair of exons. | Only the attributes of the lines that are used are parsed (genes in the first pass, exons in the second); the graph is built with a dictionary. The annotation file is identical. | GENCODE v34: 2 min 05 s to 42-48 s. |
+| `classes/gene.py` (`label_alt`) | A Python loop with many small numpy calls per gene. | A numba kernel for the usual graphs, a numpy implementation for large graphs and unusual dtypes, SplAdder's original code for degenerate graphs. The kernel reproduces two index quirks of the original, so the labels stay the same. | Compared with the original on 2.16 million random graphs and 3 x 60,669 real genes. |
+| `classes/gene.py` (`to_sparse`, `from_sparse`, `add_exon`) | Converting the adjacency matrices through scipy's `coo_matrix` for every gene; `np.r_` and `expand_dims` for every exon. | The same entries are computed with numpy (scipy only for unusual shapes); `np.concatenate`. | About 10 times faster conversion. |
+| `classes/segmentgraph.py` (`from_gene`), `classes/splicegraph.py` (`uniquify`) | Loops over segments and over all pairs of exons. | Vectorized (`searchsorted`, broadcasting); `uniquify` returns early when there are no duplicates. | |
+| `editgraph.py` (`insert_intron_retentions`, `insert_cassette_exons`) | For every pair of connected exons, and for every pair of introns, several numpy calls inside Python loops. | The coverage test for intron retentions is a numba function that follows the order of operations of the numpy code, so the floating point results are the same. The candidate pairs for cassette exons are found with vectorized operations. Unusual inputs use the original loops. | |
+| `core/gen_graphs.py`, `core/spladdercore.py` | The editing of the genes ran in one process. | The editing of a gene only depends on the genes of its contig, so the contigs are put together to shards of similar size and edited in different processes. The side effects of the steps on the options are replayed in the main process. The evidence of the contigs is read in parallel. | Part of the graph stage: 1 h 34 min to 1 min 53 s with the other changes. |
+
+**C. Merging and counting**
+
+| Where | Problem in SplAdder 3.1.1 | What spladder-turbo does | Effect |
+|---|---|---|---|
+| `merge.py` | The merged graph was written, then loaded by the counting step, which built the segment graphs and wrote the 217 MB file a second time. | If the merged graph is quantified next and not changed afterwards (no `--validate-sg`), the segment graphs are made while merging. | One write of the large file less. |
+| `count.py` (`_count_gene`, `_count_contig`, `_count_shard`, `_collect_counts`) | For every segment of every gene, the mean coverage was computed with numpy calls; for every edge, the whole intron list was scanned. Samples and contigs were counted one after the other. | The means of all segments of a gene come from cumulative sums (exact, because the coverage values are integers, so the numbers are the same). The intron counts come from a sorted search. Contigs and samples are counted in different processes. The counts of all genes are put together in one step. | |
+| `count.py` (`compute_gene_expression`) | The whole `gene_names` table was read from the HDF5 file inside the loop over the genes. | It is read once. | 44.6 s to 9.9 s. |
+
+**D. Events**
+
+| Where | Problem in SplAdder 3.1.1 | What spladder-turbo does | Effect |
+|---|---|---|---|
+| `alt_splice/detect.py`, `alt_splice/verify.py` | Every task of the process pools received pickled gene objects. For each event, the counts of its gene were read from the HDF5 file again. | The workers inherit the graph by fork; tasks only carry indices. The counts of a gene are read once for all its events; rows are found by binary search. Numba functions are cached on disk. | Verification of exon skips: 36 s to about 10 s. The 20 s of serialization in the main process are gone. |
+| `spladder_build.py` | The events were detected after the quantification, and the event types were verified one after the other. | Events depend on the splicing graph, not on the counts, so they are collected in three background jobs while the graph is quantified. The six event types are verified at the same time. | The detection of events no longer appears as a step of its own. |
+
+**E. Orchestration and input/output**
+
+| Where | Problem in SplAdder 3.1.1 | What spladder-turbo does | Effect |
+|---|---|---|---|
+| `parallel.py` (new) | No parallel processing of the samples. They cannot simply be run side by side, because `make_introns_feasible` changes `options.read_filter` in place, so in a serial run a sample depends on the samples before it. | A fork-based framework. The graphs of the samples are computed speculatively in parallel, each from the state it would have if no sample changed the filter. The results are accepted in sample order and only if that state was right; otherwise the sample is computed again in order. A worker that dies raises an error; workers end with the main process; output and errors are shown by the main process. | The result is exactly that of the serial run. |
+| `utils.py` (`load_pickle`, `dump_pickle`, `load_pickle_shared`) | The splicing graphs consist of millions of small objects: the garbage collector made loading about twice as slow. A run loaded the same graph file about 12 times. A killed run could leave a part of a file. | The garbage collector is paused while loading and writing. Files are written to a temporary file and renamed. A file that is unchanged is not loaded again by the same process. | Loading about 2 times faster, writing about one third faster. |
+| `utils.py` (`jit_cached`) | Every process compiled the numba functions again (about 17 s). | The compiled code is cached on disk. | The first run compiles (about half a minute), later runs and all worker processes do not. |
+| `spladder.py` | The linear algebra libraries (OpenBLAS, OpenMP, MKL) ran threads on small matrices, which only burn CPU, and oversubscribe the cores when several processes run. | One thread, unless the user sets the variables. | |
+
+### How the results are kept the same
+
+- **Reproduce, do not approximate.** Compiled kernels follow the order of the floating point operations of the original code. Where sums are replaced by cumulative sums, the values are integers, so the sums are exact.
+- **Fall back to SplAdder's code.** Whatever a fast path does not cover (several alignment files, `--var-aware`, CRAM, a missing NM tag, unusual tags, damaged files, degenerate graphs) is handled by the code of SplAdder.
+- **The original stays as the reference.** `tests/reference.py` contains verbatim copies of the SplAdder 3.1.1 implementations of the optimized functions; the tests compare against them with random and adversarial input.
+- **Speculation is checked.** Parallel processing of the samples is only accepted if the state each sample started from is the one of the serial run.
+- **Peculiarities are kept.** Where SplAdder behaves in a way that looks unintended but changes the output (for example in `Gene.label_alt`), spladder-turbo does the same.
+
+### What was not changed
+
+The method: the rules and thresholds for augmenting the splicing graph, the definitions of the events, the criteria for verifying them, the quantification, the command line options and the output formats.
 
 ## Are the results the same?
 
@@ -108,6 +196,7 @@ takes about three minutes. With numpy 1.x, 6 tests of `tests/test_end_to_end.py`
 - [SplAdder documentation](https://spladder.readthedocs.io) for the command line and the output files.
 - [docs/PERFORMANCE_CHANGES.md](docs/PERFORMANCE_CHANGES.md): what was changed and why, how the results are kept identical, and the record of the code review (in Chinese for now).
 - [ATTRIBUTION.md](ATTRIBUTION.md): credits and licensing.
+- [README.zh-CN.md](README.zh-CN.md): this page in Chinese.
 
 ## Citation
 

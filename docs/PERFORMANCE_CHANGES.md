@@ -78,7 +78,7 @@ Bug 修复（第 9 部分）。
 | 文件 | 改动 |
 |---|---|
 | `spladder/evidence.py`（新） | `ContigEvidence`：每个 contig 一遍扫描得到各 XS 类别（无 / + / − / 其他）的覆盖度阶梯函数和内含子数组。`EvidenceScope` / `evidence_scope()`：持有已建好的 contig 证据，带内存上限（`SPLADDER_EVIDENCE_MAX_GB`，默认 6）和 LRU 淘汰。`prefetch_contigs`：用多进程并行预读 contig。`add_reads_from_evidence`：按原版 `add_reads_from_bam` 的语义回答窗口查询（包含判定 `start > win_start & stop < win_stop`、`mincount` 过滤、`unstranded` 时正负链合并排序），不支持时返回 `NotImplemented` 退回原路径。 |
-| `spladder/bamscan.py`（新） | 编译版 BAM 读取器：用 BAI 索引（优先用伪 bin 37450，缺失时取全部 chunk 的包络）定位 contig，自己解压 BGZF 块（`zlib` 原始 deflate，并校验每块的 CRC32 与长度），用 numba 函数 `_scan` 直接解码比对记录，过滤顺序与条件与 pysam 循环逐条对应。对 chr1（400 万条比对）从 11.9 s 降到 3.2 s（含块校验）。遇到 CRAM、非 BAI 索引、非整数 NM、非 `A` 型 XS、缺 NM、截断或损坏的文件、CIGAR 放在 `CG` 标签里的超长比对等就抛 `NotSupported` 由调用方退回 pysam（htslib 在读出记录之后做的那些处理，读取器要么复现，要么放弃，见 9.2）。 |
+| `spladder/bamscan.py`（新） | 编译版 BAM 读取器：用 BAI 索引（优先用伪 bin 37450，缺失时取全部 chunk 的包络）定位 contig，自己解压 BGZF 块（`zlib` 原始 deflate，并校验每块的 CRC32 与长度），用 numba 函数 `_scan` 直接解码比对记录，过滤顺序与条件与 pysam 循环逐条对应。对 chr1（约 400 万个比对块）从 11.9 s 降到 3.2 s（含块校验）。遇到 CRAM、非 BAI 索引、非整数 NM、非 `A` 型 XS、缺 NM、截断或损坏的文件、CIGAR 放在 `CG` 标签里的超长比对等就抛 `NotSupported` 由调用方退回 pysam（htslib 在读出记录之后做的那些处理，读取器要么复现，要么放弃，见 9.2）。 |
 | `spladder/reads.py` | `_get_reads_reference`（原版逐字保留）；`_get_reads_collapsed`（逐窗口快速路径：CIGAR 只解码一次、只读需要的标签、差分数组累加覆盖度）；`_get_alignment_file`（按进程 id 区分的打开文件 LRU 缓存，避免每个基因重新打开 BAM 并加载索引）；`add_reads_from_bam` 增加 `use_cache` 参数并先询问 `evidence`；`get_intron_list` 增加 `cache` 参数。 |
 | `spladder/helpers.py` | `MAX_FEASIBLE_INTRONS = 200` 提为常量（便于测试）；`make_introns_feasible` 的重新查询使用 `cache=False`。 |
 
