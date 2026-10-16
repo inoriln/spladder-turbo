@@ -9,7 +9,81 @@ spladder-turbo is meant as a drop-in replacement: the same command line, the sam
 > **Status: development version 0.1.0, installable from GitHub, not yet released on PyPI.**
 > spladder-turbo is **not affiliated with or endorsed by** the SplAdder authors or their institutions. The method, the definitions of the events and the file formats are theirs. If you use this software, please cite the SplAdder paper (see [Citation](#citation)).
 
-**Contents:** [Performance](#performance) · [What was optimized, where, and why](#what-was-optimized-where-and-why) · [Are the results the same?](#are-the-results-the-same) · [Installation](#installation) · [Usage](#usage) · [Tests](#tests) · [Documentation](#documentation) · [Citation](#citation) · [License and attribution](#license-and-attribution)
+**Contents:** [Installation](#installation) · [Usage](#usage) · [Tests](#tests) · [Performance](#performance) · [What was optimized, where, and why](#what-was-optimized-where-and-why) · [Are the results the same?](#are-the-results-the-same) · [Documentation](#documentation) · [Citation](#citation) · [License and attribution](#license-and-attribution)
+
+## Installation
+
+**Recommended: Python 3.11 in a dedicated Conda or micromamba environment.** The package declares Python 3.9 or newer; Python 3.11 has been tested with a fresh installation from GitHub on Linux, including serial and parallel builds. Runtime dependencies in [requirements.txt](requirements.txt) are installed automatically by pip.
+
+**Do not install spladder-turbo into an environment that already contains SplAdder.** Both provide the Python package `spladder` and the command `spladder`, so installing one can overwrite the other. The commands `spladder-turbo` and `spladder` run the same program.
+
+### Conda
+
+```bash
+conda create -n spladder-turbo -c conda-forge python=3.11 pip git -y
+conda activate spladder-turbo
+python -m pip install git+https://github.com/inoriln/spladder-turbo.git
+```
+
+### micromamba
+
+```bash
+micromamba create -n spladder-turbo -c conda-forge python=3.11 pip git -y
+micromamba activate spladder-turbo
+python -m pip install git+https://github.com/inoriln/spladder-turbo.git
+```
+
+Use either manager to create the environment, then install the project from GitHub with pip. If your shell is not configured for micromamba activation, use `micromamba run -n spladder-turbo python -m pip install git+https://github.com/inoriln/spladder-turbo.git` instead.
+
+After installation, check dependencies and the command entry point in the new environment:
+
+```bash
+python -m pip check
+spladder-turbo build --help
+```
+
+For a local clone, run `python -m pip install .` from its root directory in the same dedicated environment.
+
+## Usage
+
+The command line is the same as SplAdder's; see the [SplAdder documentation](https://spladder.readthedocs.io) for all options and output files. A minimal example:
+
+```bash
+spladder build -a annotation.gtf -o results -b sample1.bam,sample2.bam --parallel 8
+```
+
+`--parallel N` uses N processes for the sample graphs, counting, and the collection and verification of events. The number of processes may briefly exceed N. Results do not depend on N. The fast reader requires sorted alignment files with a `.bai` index; other files can still be read with pysam, more slowly.
+
+Environment variables:
+
+| Variable | Effect |
+|---|---|
+| `SPLADDER_EVIDENCE_MAX_GB` | Maximum memory per process for alignment evidence, default 6 |
+| `SPLADDER_NO_BAMSCAN=1` | Read alignments with pysam instead of the compiled reader |
+| `SPLADDER_NO_EVIDENCE=1` | Read alignments per gene, as SplAdder does |
+
+### Switching from SplAdder
+
+Run both programs in separate environments on a small part of your own data, such as a few samples on one chromosome. Use the same options, separate output directories and separate annotation copies: the annotation is converted to a `.pickle` file next to the input. From a clone of this repository in the spladder-turbo environment, compare the outputs with [tests/compare.py](tests/compare.py), which checks text, HDF5 datasets and deserialized pickle objects:
+
+```bash
+python -c "from tests.compare import compare_dirs; print(compare_dirs('run_spladder', 'run_turbo') or 'identical')"
+```
+
+## Tests
+
+The repository test suite requires a source checkout. In the dedicated environment created above:
+
+```bash
+git clone https://github.com/inoriln/spladder-turbo.git
+cd "spladder-turbo"
+python -m pip install . pytest
+python -m pytest tests -q
+```
+
+If you already have a clone, run the last two commands from its root directory. The suite takes about three minutes, depending on the machine. With numpy 1.x, six tests in `tests/test_end_to_end.py` fail because their expected fixtures were written with numpy 2; upstream SplAdder fails in the same way.
+
+A separate installation smoke test on Linux / Python 3.11 installed the GitHub package into a fresh Conda environment without upstream SplAdder, passed `pip check` and all four subcommand help checks, and completed serial and parallel builds on two synthetic samples. All 36 output files matched in content, datasets and objects. This does not establish compatibility with every Python or dependency version.
 
 ## Performance
 
@@ -39,7 +113,7 @@ The same workflow on chr20 only, three samples (SRR29779619 to SRR29779621). The
 | EPYC 7601, turbo `--parallel 8` (historical) | 5 min 04 s (one process) | 23 s | 13 x, compared with one process of SplAdder |
 | EPYC 7C13, both `--parallel 8` (2026-10-15) | 253.8 s | 39.3 s | 6.5 x |
 
-The new chr20 measurement runs each version once, from the GTF, without an extra warm-up or forced clearing of compiled caches. Both exit successfully; all 39 output files have identical content, and the converted annotation objects are equal. This compares file contents, datasets and objects, not necessarily raw file bytes. Commands, exact timings and limitations are in [the benchmark record](docs/BENCHMARK_PARALLEL8.md#chr20-2026-10-15-复测).
+The new chr20 measurement runs each version once, from the GTF, without an extra warm-up or forced clearing of compiled caches. Both exit successfully; all 39 output files have identical content, and the converted annotation objects are equal. This compares file contents, datasets and objects, not necessarily raw file bytes. Commands, exact timings and limitations are in [the benchmark record](docs/BENCHMARK_PARALLEL8.md#chr20-rerun-2026-10-15).
 
 How to read these numbers:
 
@@ -153,57 +227,6 @@ Known differences:
 - Parallel processing needs Linux; elsewhere everything runs serially (slower, but the same results).
 
 Not validated yet: aligners other than STAR, species other than human, cohorts of more than three samples, CRAM files, `--var-aware`, `--sparse-bam` for a whole genome, and operating systems other than Linux. Paired-end validation is limited to the two PRJNA312948 samples and options recorded above. The code is written to behave like SplAdder in these cases (anything that is not understood falls back to the code of SplAdder), but this has only been tested on small synthetic data. Please compare the outputs of both programs on a small part of your own data before you switch (see [Switching from SplAdder](#switching-from-spladder)), and report differences as issues.
-
-## Installation
-
-spladder-turbo needs Python 3.9 or newer and the packages in [requirements.txt](requirements.txt). We recommend a package manager such as conda to organize the dependencies.
-
-```bash
-pip install git+https://github.com/inoriln/spladder-turbo.git
-```
-
-or, from a clone of this repository:
-
-```bash
-pip install .
-```
-
-**Do not install spladder-turbo into an environment that contains SplAdder.** Both provide the Python package `spladder` and the command `spladder`, so one overwrites the files of the other. Use a separate environment. The command `spladder-turbo` is the same program as `spladder`.
-
-## Usage
-
-The command line is that of SplAdder; see the [SplAdder documentation](https://spladder.readthedocs.io) for all options and for the description of the output files. A minimal run:
-
-```bash
-spladder build -a annotation.gtf -o results -b sample1.bam,sample2.bam --parallel 8
-```
-
-`--parallel N` uses N processes for the graphs of the samples, for the counting, and for the collection and verification of events. The number of processes can briefly exceed N. The results do not depend on N. The alignment files must be sorted and indexed (`.bai`) for the fast reader; other files are read, more slowly, with pysam.
-
-Environment variables:
-
-| Variable | Effect |
-|---|---|
-| `SPLADDER_EVIDENCE_MAX_GB` | memory limit for the alignment information kept per process, default 6 |
-| `SPLADDER_NO_BAMSCAN=1` | read the alignments with pysam instead of the compiled reader |
-| `SPLADDER_NO_EVIDENCE=1` | read the alignments gene by gene, as SplAdder does |
-
-### Switching from SplAdder
-
-Run both programs, each in its own environment, on a small part of your data (for example one chromosome of a few samples). Use the same options for both runs, and give each run its own output directory and its own copy of the annotation file (the annotation is converted to a `.pickle` file next to it). Then compare the two output directories with the function that we use ([tests/compare.py](tests/compare.py)): it compares text files, HDF5 datasets and the objects in pickle files, and returns the list of differences. In a clone of this repository, in the environment of spladder-turbo:
-
-```bash
-python -c "from tests.compare import compare_dirs; print(compare_dirs('run_spladder', 'run_turbo') or 'identical')"
-```
-
-## Tests
-
-```bash
-pip install pytest
-pytest tests -q
-```
-
-takes about three minutes. With numpy 1.x, 6 tests of `tests/test_end_to_end.py` fail because the expected results of the SplAdder test data were written with numpy 2; they fail in the same way with SplAdder.
 
 ## Documentation
 

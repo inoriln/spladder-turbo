@@ -9,7 +9,81 @@ spladder-turbo 的目标是可以直接替换 SplAdder：命令行相同，输�
 > **状态：开发版 0.1.0，可从 GitHub 安装，尚未发布到 PyPI。**
 > spladder-turbo **与 SplAdder 的作者及其所属机构没有关联，也未获得他们的认可或背书**。方法、事件的定义和文件格式都是他们的工作。如果你使用了本软件，请引用 SplAdder 的论文（见[引用](#引用)）。
 
-**目录：** [性能](#性能) · [优化了什么、在哪里、为什么](#优化了什么在哪里为什么) · [结果是否相同](#结果是否相同) · [安装](#安装) · [使用](#使用) · [测试](#测试) · [文档](#文档) · [引用](#引用) · [许可与署名](#许可与署名)
+**目录：** [安装](#安装) · [使用](#使用) · [测试](#测试) · [性能](#性能) · [优化了什么、在哪里、为什么](#优化了什么在哪里为什么) · [结果是否相同](#结果是否相同) · [文档](#文档) · [引用](#引用) · [许可与署名](#许可与署名)
+
+## 安装
+
+**推荐在独立的 Conda 或 micromamba 环境中使用 Python 3.11。** 包声明支持 Python 3.9 或更新版本；Python 3.11 已在 Linux 上通过从 GitHub 全新安装及串行、并行构建验证。[requirements.txt](requirements.txt) 中的运行依赖由 pip 自动安装。
+
+**不要把 spladder-turbo 装进已经有 SplAdder 的环境。** 两者都提供 Python 包 `spladder` 和命令 `spladder`，后装的可能覆盖先装的文件。命令 `spladder-turbo` 与 `spladder` 是同一个程序。
+
+### Conda
+
+```bash
+conda create -n spladder-turbo -c conda-forge python=3.11 pip git -y
+conda activate spladder-turbo
+python -m pip install git+https://github.com/inoriln/spladder-turbo.git
+```
+
+### micromamba
+
+```bash
+micromamba create -n spladder-turbo -c conda-forge python=3.11 pip git -y
+micromamba activate spladder-turbo
+python -m pip install git+https://github.com/inoriln/spladder-turbo.git
+```
+
+任选一种环境管理器创建环境，再用 pip 从 GitHub 安装项目。如果当前 shell 未配置 micromamba 激活，可改用 `micromamba run -n spladder-turbo python -m pip install git+https://github.com/inoriln/spladder-turbo.git`。
+
+安装后，在新环境中检查依赖和命令入口：
+
+```bash
+python -m pip check
+spladder-turbo build --help
+```
+
+如果使用本地克隆，在同一个独立环境中，从仓库根目录运行 `python -m pip install .`。
+
+## 使用
+
+命令行与 SplAdder 相同；全部选项和输出文件的说明见 [SplAdder 文档](https://spladder.readthedocs.io)。最小的例子：
+
+```bash
+spladder build -a annotation.gtf -o results -b sample1.bam,sample2.bam --parallel 8
+```
+
+`--parallel N` 用 N 个进程处理各样本的图、计数，以及事件的收集和验证。进程数短时间内可能超过 N。结果不依赖于 N。使用快速读取器时，比对文件必须已排序并建好索引（`.bai`）；其他文件仍可读取，但用 pysam，较慢。
+
+环境变量：
+
+| 变量 | 作用 |
+|---|---|
+| `SPLADDER_EVIDENCE_MAX_GB` | 每个进程保存比对信息的内存上限，默认 6 |
+| `SPLADDER_NO_BAMSCAN=1` | 用 pysam 读取比对，不用编译版读取器 |
+| `SPLADDER_NO_EVIDENCE=1` | 像 SplAdder 那样逐基因读取比对 |
+
+### 从 SplAdder 切换
+
+在各自的环境里运行两个程序，用你数据的一小部分（例如几个样本的一条染色体）。两次运行使用相同的选项，各自使用独立的输出目录和独立的注释文件副本（注释会被转换成它旁边的一个 `.pickle` 文件）。然后用我们使用的函数（[tests/compare.py](tests/compare.py)）比较两个输出目录：它比较文本文件、HDF5 数据集和 pickle 文件里的对象，并返回差异的列表。在本仓库的克隆里，在 spladder-turbo 的环境中运行：
+
+```bash
+python -c "from tests.compare import compare_dirs; print(compare_dirs('run_spladder', 'run_turbo') or 'identical')"
+```
+
+## 测试
+
+运行仓库测试需要源码检出。在上面创建的独立环境中执行：
+
+```bash
+git clone https://github.com/inoriln/spladder-turbo.git
+cd "spladder-turbo"
+python -m pip install . pytest
+python -m pytest tests -q
+```
+
+如果已有克隆，在仓库根目录运行最后两条命令即可。测试大约需要三分钟，具体取决于机器。在 numpy 1.x 下，`tests/test_end_to_end.py` 里有 6 个测试会失败，因为 SplAdder 测试数据的期望结果是用 numpy 2 写出的；SplAdder 本身也同样失败。
+
+独立安装冒烟测试已在 Linux / Python 3.11 上完成：全新 Conda 环境中从 GitHub 安装，不预装原版 SplAdder；`pip check` 和四个子命令帮助检查通过；两个合成样本的串行、并行构建均成功，36 个输出文件的内容、数据集和对象全部一致。这不代表所有 Python 及依赖版本组合都已验证。
 
 ## 性能
 
@@ -39,7 +113,7 @@ spladder-turbo 的目标是可以直接替换 SplAdder：命令行相同，输�
 | EPYC 7601，turbo `--parallel 8`（历史测量） | 5 分 04 秒（单进程） | 23 秒 | 13 倍（与 SplAdder 单进程相比） |
 | EPYC 7C13，双方均为 `--parallel 8`（2026-10-15） | 253.8 秒 | 39.3 秒 | 6.5 倍 |
 
-本次 chr20 复测让每个版本从 GTF 开始运行一次，没有额外预热，也没有强制清除编译缓存。双方均成功退出，39 个输出文件内容一致，转换后的注释对象也相同。这里比较的是文件内容、数据集和对象，不要求原始文件逐字节一致。命令、精确计时及限制见[测试记录](docs/BENCHMARK_PARALLEL8.md#chr20-2026-10-15-复测)。
+本次 chr20 复测让每个版本从 GTF 开始运行一次，没有额外预热，也没有强制清除编译缓存。双方均成功退出，39 个输出文件内容一致，转换后的注释对象也相同。这里比较的是文件内容、数据集和对象，不要求原始文件逐字节一致。命令、精确计时及限制见[测试记录](docs/BENCHMARK_PARALLEL8.md#chr20-rerun-2026-10-15)。
 
 如何理解这些数字：
 
@@ -153,57 +227,6 @@ spladder-turbo 改变的是 SplAdder *怎样*计算，而不是*计算什么*。
 - 并行处理需要 Linux；其他系统上一切串行运行（更慢，但结果相同）。
 
 尚未验证：STAR 以外的比对器、人类以外的物种、三个以上样本的队列、CRAM 文件、`--var-aware`、全基因组的 `--sparse-bam`，以及 Linux 以外的操作系统。双端数据验证目前限于上面记录的 PRJNA312948 两个样本及对应选项。代码的设计是在这些情形下与 SplAdder 保持一致（凡是不能确认的都退回 SplAdder 的代码），但目前只在小的合成数据上测试过。切换之前，请先在你自己数据的一小部分上比较两个程序的输出（见[从 SplAdder 切换](#从-spladder-切换)），发现差异请提交 issue。
-
-## 安装
-
-spladder-turbo 需要 Python 3.9 或更新版本，以及 [requirements.txt](requirements.txt) 里的包。建议用 conda 之类的包管理器管理依赖。
-
-```bash
-pip install git+https://github.com/inoriln/spladder-turbo.git
-```
-
-或者在本仓库的克隆里：
-
-```bash
-pip install .
-```
-
-**不要把 spladder-turbo 装进已经有 SplAdder 的环境。** 两者都提供 Python 包 `spladder` 和命令 `spladder`，后装的会覆盖先装的文件。请使用单独的环境。命令 `spladder-turbo` 与 `spladder` 是同一个程序。
-
-## 使用
-
-命令行与 SplAdder 相同；全部选项和输出文件的说明见 [SplAdder 文档](https://spladder.readthedocs.io)。最小的例子：
-
-```bash
-spladder build -a annotation.gtf -o results -b sample1.bam,sample2.bam --parallel 8
-```
-
-`--parallel N` 用 N 个进程处理各样本的图、计数，以及事件的收集和验证。进程数短时间内可能超过 N。结果不依赖于 N。使用快速读取器时，比对文件必须已排序并建好索引（`.bai`）；其他文件仍可读取，但用 pysam，较慢。
-
-环境变量：
-
-| 变量 | 作用 |
-|---|---|
-| `SPLADDER_EVIDENCE_MAX_GB` | 每个进程保存比对信息的内存上限，默认 6 |
-| `SPLADDER_NO_BAMSCAN=1` | 用 pysam 读取比对，不用编译版读取器 |
-| `SPLADDER_NO_EVIDENCE=1` | 像 SplAdder 那样逐基因读取比对 |
-
-### 从 SplAdder 切换
-
-在各自的环境里运行两个程序，用你数据的一小部分（例如几个样本的一条染色体）。两次运行使用相同的选项，各自使用独立的输出目录和独立的注释文件副本（注释会被转换成它旁边的一个 `.pickle` 文件）。然后用我们使用的函数（[tests/compare.py](tests/compare.py)）比较两个输出目录：它比较文本文件、HDF5 数据集和 pickle 文件里的对象，并返回差异的列表。在本仓库的克隆里，在 spladder-turbo 的环境中运行：
-
-```bash
-python -c "from tests.compare import compare_dirs; print(compare_dirs('run_spladder', 'run_turbo') or 'identical')"
-```
-
-## 测试
-
-```bash
-pip install pytest
-pytest tests -q
-```
-
-大约需要三分钟。在 numpy 1.x 下，`tests/test_end_to_end.py` 里有 6 个测试会失败，因为 SplAdder 测试数据的期望结果是用 numpy 2 写出的；SplAdder 本身也同样失败。
 
 ## 文档
 
