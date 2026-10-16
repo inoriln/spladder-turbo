@@ -2,7 +2,7 @@
 
 ## 范围与输入
 
-2026-10-15，从 `/data/data2/IO_RNA/AS/` 选择 PRJNA312948，使用按编号排序的
+2026-10-15，从本地公共数据目录选择 PRJNA312948，使用按编号排序的
 前两个样本 SRR3184279、SRR3184280，进行全基因组比较。未截取染色体、未下采样，
 未复用历史剪接图、计数结果或转换后的注释。
 
@@ -17,14 +17,14 @@
 有 986 条和 994 条，其余为较短读段。STAR 原始日志显示双端输入，平均输入长度
 为 199 bp（两端合计），所以双方均设置 `-n 100`。
 
-原始 BAM 路径为：
+原始 BAM 为本地公共数据文件，具体存储路径不在此公开：
 
 ```text
-/data/data2/IO_RNA/AS/PRJNA312948/aligned/SRR3184279/SRR3184279_Aligned.sortedByCoord.out.bam
-/data/data2/IO_RNA/AS/PRJNA312948/aligned/SRR3184280/SRR3184280_Aligned.sortedByCoord.out.bam
+<local-data-root>/PRJNA312948/aligned/SRR3184279/SRR3184279_Aligned.sortedByCoord.out.bam
+<local-data-root>/PRJNA312948/aligned/SRR3184280/SRR3184280_Aligned.sortedByCoord.out.bam
 ```
 
-注释为 `/data/data2/reference/hg38_ek12/gencode.v34.annotation.gtf`。
+注释为本地 hg38 / GENCODE v34 文件。
 原始 STAR 比对与 featureCounts 日志均指向该 hg38 参考目录。
 
 原始数据只读使用。测试目录通过软链接引用 BAM 和 GTF，并使用 samtools/pysam
@@ -101,7 +101,7 @@ mutex_exons。另用 `deep_equal` 比较转换后的注释对象，结果一致�
 python -m spladder.spladder build \
     -a "annotation/gencode.v34.annotation.gtf" \
     -o "out" \
-    -b "/data/home/zyh/others/spladder/build/as_pair_20261015/inputs/SRR3184279.bam,/data/home/zyh/others/spladder/build/as_pair_20261015/inputs/SRR3184280.bam" \
+    -b "<workdir>/inputs/SRR3184279.bam,<workdir>/inputs/SRR3184280.bam" \
     --parallel 8 --merge-strat merge_graphs --extract-ase -n 100
 ```
 

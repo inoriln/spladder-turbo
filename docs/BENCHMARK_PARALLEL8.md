@@ -2,8 +2,7 @@
 
 ## 全基因组：历史终端记录
 
-来源：维护者于 2026-10-15 提供的 Claude 命令及输出。原始目录
-`/tmp/baseline_par8`、`/tmp/spladder_bench`、`/tmp/spladder_gold` 在当前环境中
+来源：维护者于 2026-10-15 提供的 Claude 命令及输出。原始临时目录在当前环境中
 均不可访问；以下数据是历史终端记录的摘录，不是本次重新测量或重新比对的结果。
 
 场景为 GENCODE v34、人类全基因组、GSE272028 的 SRR29779619 和 SRR29779620，
@@ -26,9 +25,9 @@
 历史记录中的输出比对命令：
 
 ```bash
-cd /tmp/spladder_bench
-/data/home/zyh/micromamba/envs/spladder/bin/python compare_runs.py \
-    /tmp/spladder_gold/out /tmp/baseline_par8/out
+cd <benchmark-workdir>
+python compare_runs.py \
+    <historical-gold>/out <historical-baseline>/out
 ```
 
 终端报告：
@@ -49,11 +48,11 @@ cd /tmp/spladder_bench
 ### 环境与输入
 
 - Linux 5.14.0-687.15.1.el9_8.x86_64，AMD EPYC 7C13 64-Core Processor，256 逻辑 CPU。
-- 同一解释器：`/data/home/zyh/micromamba/envs/spladder/bin/python`；Python 3.13.9、
+- 同一 Python 环境；Python 3.13.9、
   numpy 2.3.4、numba 0.62.1、pysam 0.23.3、h5py 3.15.1。
 - 原版源码通过 `git archive` 从 `65ceec839b9ff0cf96703c1605ee43667662f410`
   导出，包版本为 3.1.1；turbo 源码为 `b00d6c281f6f65e6b45a2bb6724ee0eb9b34dbf3`。
-- 注释来自 `/data/data2/reference/hg38_ek12/gencode.v34.annotation.gtf`，
+- 注释来自本地 hg38 / GENCODE v34 文件，
   保留注释头与 `chr20` 行，双方各自转换 GTF，不使用历史注释 pickle。
 - 从原始排序 BAM 中用 `pysam.view` 提取全部 chr20 比对，并重新建立索引：
 
@@ -103,7 +102,7 @@ HDF5 数据集和 pickle 对象；另用 `deep_equal` 比较转换后的注释�
 `--workdir`，因为计时脚本会重建其输出目录。
 
 ```bash
-/data/home/zyh/micromamba/envs/spladder/bin/python -B validation/benchmark.py \
+python -B validation/benchmark.py \
     --upstream-src "$PWD/build/parallel8_20261015/src_orig" \
     --annotation "$PWD/build/parallel8_20261015/inputs/gencode.v34.chr20.gtf" \
     --bams "$PWD/build/parallel8_20261015/inputs/SRR29779619.chr20.bam,$PWD/build/parallel8_20261015/inputs/SRR29779620.chr20.bam,$PWD/build/parallel8_20261015/inputs/SRR29779621.chr20.bam" \
@@ -114,7 +113,7 @@ HDF5 数据集和 pickle 对象；另用 `deep_equal` 比较转换后的注释�
 比较该次生成的输出和注释对象：
 
 ```bash
-/data/home/zyh/micromamba/envs/spladder/bin/python -B - <<'PY'
+python -B - <<'PY'
 import pickle
 from pathlib import Path
 from tests.compare import compare_dirs, deep_equal
